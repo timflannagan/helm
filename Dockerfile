@@ -22,3 +22,7 @@ FROM centos:7
 COPY --from=build /go/src/k8s.io/helm/rootfs/tiller /usr/local/bin
 COPY --from=build /go/src/k8s.io/helm/bin/helm /usr/local/bin
 
+LABEL io.k8s.display-name="OpenShift metering-helm" \
+      io.k8s.description="This is a base image used by operator-metering to assist in managing the lifecycle of the Openshift Metering components." \
+      io.openshift.tags="openshift" \
+      maintainer="Chance Zibolski <czibolsk@redhat.com>"
