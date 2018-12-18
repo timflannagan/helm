@@ -14,7 +14,7 @@ COPY . .
 RUN make build
 RUN make docker-binary
 
-FROM centos:7
+FROM rhel7:7-released
 
 COPY --from=build /go/src/k8s.io/helm/rootfs/tiller /usr/local/bin
 COPY --from=build /go/src/k8s.io/helm/bin/helm /usr/local/bin
