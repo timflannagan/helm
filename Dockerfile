@@ -4,8 +4,9 @@ FROM centos:7 as build
 
 RUN yum -y update && yum clean all
 
-RUN mkdir -p /go && chmod -R 777 /go && \
-    yum -y install hg git golang make
+RUN mkdir -p /go && chmod -R 777 /go \
+    && yum -y install --setopt=skip_missing_names_on_install=False \
+    hg git golang make
 RUN yum clean all && rm -rf /var/cache/yum
 
 ENV GOPATH /go
