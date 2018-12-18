@@ -1,13 +1,9 @@
-FROM centos:7 as build
-# CentOS golang build environment based on
-# https://github.com/CentOS/CentOS-Dockerfiles/blob/master/golang/centos7/Dockerfile
+FROM openshift/origin-release:golang-1.10 as build
 
-RUN yum -y update && yum clean all
-
-RUN mkdir -p /go && chmod -R 777 /go \
-    && yum -y install --setopt=skip_missing_names_on_install=False \
-    hg git golang make
-RUN yum clean all && rm -rf /var/cache/yum
+RUN yum install --setopt=skip_missing_names_on_install=False -y \
+        hg git make \
+    && yum clean all \
+    && rm -rf /var/cache/yum
 
 ENV GOPATH /go
 
