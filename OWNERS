@@ -1,32 +1,5 @@
-maintainers:
-  - adamreese
-  - bacongobbler
-  - jascott1
-  - mattfarina
-  - michelleN
-  - migmartri
-  - nebril
-  - prydonius
-  - seh
-  - SlickNik
-  - technosophos
-  - thomastaylor312
-  - vaikas-google
-  - viglesiasce
+approvers:
+- chancez
 reviewers:
-  - adamreese
-  - bacongobbler
-  - fibonacci1729
-  - jascott1
-  - mattfarina
-  - michelleN
-  - migmartri
-  - nebril
-  - prydonius
-  - sebgoa
-  - seh
-  - SlickNik
-  - technosophos
-  - thomastaylor312
-  - vaikas-google
-  - viglesiasce
+- tschuy
+- EmilyM1
