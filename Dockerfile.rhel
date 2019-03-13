@@ -11,6 +11,8 @@ RUN mkdir -p /go/src/k8s.io/helm
 WORKDIR /go/src/k8s.io/helm
 COPY . .
 
+# unset VERSION inherited from base before building
+ENV VERSION ""
 RUN make build
 RUN make docker-binary
 
