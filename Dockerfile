@@ -1,4 +1,4 @@
-FROM openshift/origin-release:golang-1.10 as build
+FROM openshift/origin-release:golang-1.13 as build
 
 RUN yum install --setopt=skip_missing_names_on_install=False -y \
         hg git make \
