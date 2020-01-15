@@ -58,7 +58,6 @@ check-docker:
 
 .PHONY: docker-binary
 docker-binary: BINDIR = ./rootfs
-docker-binary: GOFLAGS += -a -installsuffix cgo
 docker-binary:
 	GOOS=linux CGO_ENABLED=0 $(GO) build -o $(BINDIR)/tiller $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' k8s.io/helm/cmd/tiller
 
@@ -69,7 +68,6 @@ docker-build: check-docker docker-binary
 
 .PHONY: docker-binary-rudder
 docker-binary-rudder: BINDIR = ./rootfs
-docker-binary-rudder: GOFLAGS += -a -installsuffix cgo
 docker-binary-rudder:
 	GOOS=linux CGO_ENABLED=0 $(GO) build -o $(BINDIR)/rudder $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' k8s.io/helm/cmd/rudder
 
