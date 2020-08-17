@@ -25,4 +25,4 @@ RUN ln -s /usr/local/bin/tiller /tiller
 LABEL io.k8s.display-name="OpenShift metering-helm" \
       io.k8s.description="This is a base image used by operator-metering to assist in managing the lifecycle of the Openshift Metering components." \
       io.openshift.tags="openshift" \
-      maintainer="AOS Operator Metering <sd-operator-metering@redhat.com>"
+      maintainer="<metering-team@redhat.com>"
