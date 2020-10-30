@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -13,20 +13,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugin // import "k8s.io/helm/pkg/plugin"
+package plugin // import "helm.sh/helm/v3/pkg/plugin"
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 
-	helm_env "k8s.io/helm/pkg/helm/environment"
+	"github.com/pkg/errors"
+	"sigs.k8s.io/yaml"
 
-	"github.com/ghodss/yaml"
+	"helm.sh/helm/v3/pkg/cli"
 )
 
-const pluginFileName = "plugin.yaml"
+const PluginFileName = "plugin.yaml"
 
 // Downloaders represents the plugins capability if it can retrieve
 // charts from special sources
@@ -36,6 +40,13 @@ type Downloaders struct {
 	// Command is the executable path with which the plugin performs
 	// the actual download for the corresponding Protocols
 	Command string `json:"command"`
+}
+
+// PlatformCommand represents a command for a particular operating system and architecture
+type PlatformCommand struct {
+	OperatingSystem string `json:"os"`
+	Architecture    string `json:"arch"`
+	Command         string `json:"command"`
 }
 
 // Metadata describes a plugin.
@@ -62,7 +73,15 @@ type Metadata struct {
 	//
 	// Note that command is not executed in a shell. To do so, we suggest
 	// pointing the command to a shell script.
-	Command string `json:"command"`
+	//
+	// The following rules will apply to processing commands:
+	// - If platformCommand is present, it will be searched first
+	// - If both OS and Arch match the current platform, search will stop and the command will be executed
+	// - If OS matches and there is no more specific match, the command will be executed
+	// - If no OS/Arch match is found, the default command will be executed
+	// - If no command is present and no matches are found in platformCommand, Helm will exit with an error
+	PlatformCommand []PlatformCommand `json:"platformCommand"`
+	Command         string            `json:"command"`
 
 	// IgnoreFlags ignores any flags passed in from Helm
 	//
@@ -71,17 +90,18 @@ type Metadata struct {
 	// the `--debug` flag will be discarded.
 	IgnoreFlags bool `json:"ignoreFlags"`
 
-	// UseTunnel indicates that this command needs a tunnel.
-	// Setting this will cause a number of side effects, such as the
-	// automatic setting of HELM_HOST.
-	UseTunnel bool `json:"useTunnel"`
-
 	// Hooks are commands that will run on events.
 	Hooks Hooks
 
 	// Downloaders field is used if the plugin supply downloader mechanism
 	// for special protocols.
 	Downloaders []Downloaders `json:"downloaders"`
+
+	// UseTunnelDeprecated indicates that this command needs a tunnel.
+	// Setting this will cause a number of side effects, such as the
+	// automatic setting of HELM_HOST.
+	// DEPRECATED and unused, but retained for backwards compatibility with Helm 2 plugins. Remove in Helm 4
+	UseTunnelDeprecated bool `json:"useTunnel,omitempty"`
 }
 
 // Plugin represents a plugin.
@@ -92,14 +112,48 @@ type Plugin struct {
 	Dir string
 }
 
-// PrepareCommand takes a Plugin.Command and prepares it for execution.
+// The following rules will apply to processing the Plugin.PlatformCommand.Command:
+// - If both OS and Arch match the current platform, search will stop and the command will be prepared for execution
+// - If OS matches and there is no more specific match, the command will be prepared for execution
+// - If no OS/Arch match is found, return nil
+func getPlatformCommand(cmds []PlatformCommand) []string {
+	var command []string
+	eq := strings.EqualFold
+	for _, c := range cmds {
+		if eq(c.OperatingSystem, runtime.GOOS) {
+			command = strings.Split(os.ExpandEnv(c.Command), " ")
+		}
+		if eq(c.OperatingSystem, runtime.GOOS) && eq(c.Architecture, runtime.GOARCH) {
+			return strings.Split(os.ExpandEnv(c.Command), " ")
+		}
+	}
+	return command
+}
+
+// PrepareCommand takes a Plugin.PlatformCommand.Command, a Plugin.Command and will applying the following processing:
+// - If platformCommand is present, it will be searched first
+// - If both OS and Arch match the current platform, search will stop and the command will be prepared for execution
+// - If OS matches and there is no more specific match, the command will be prepared for execution
+// - If no OS/Arch match is found, the default command will be prepared for execution
+// - If no command is present and no matches are found in platformCommand, will exit with an error
 //
 // It merges extraArgs into any arguments supplied in the plugin. It
 // returns the name of the command and an args array.
 //
 // The result is suitable to pass to exec.Command.
-func (p *Plugin) PrepareCommand(extraArgs []string) (string, []string) {
-	parts := strings.Split(os.ExpandEnv(p.Metadata.Command), " ")
+func (p *Plugin) PrepareCommand(extraArgs []string) (string, []string, error) {
+	var parts []string
+	platCmdLen := len(p.Metadata.PlatformCommand)
+	if platCmdLen > 0 {
+		parts = getPlatformCommand(p.Metadata.PlatformCommand)
+	}
+	if platCmdLen == 0 || parts == nil {
+		parts = strings.Split(os.ExpandEnv(p.Metadata.Command), " ")
+	}
+	if len(parts) == 0 || parts[0] == "" {
+		return "", nil, fmt.Errorf("No plugin command is applicable")
+	}
+
 	main := parts[0]
 	baseArgs := []string{}
 	if len(parts) > 1 {
@@ -108,21 +162,54 @@ func (p *Plugin) PrepareCommand(extraArgs []string) (string, []string) {
 	if !p.Metadata.IgnoreFlags {
 		baseArgs = append(baseArgs, extraArgs...)
 	}
-	return main, baseArgs
+	return main, baseArgs, nil
+}
+
+// validPluginName is a regular expression that validates plugin names.
+//
+// Plugin names can only contain the ASCII characters a-z, A-Z, 0-9, ​_​ and ​-.
+var validPluginName = regexp.MustCompile("^[A-Za-z0-9_-]+$")
+
+// validatePluginData validates a plugin's YAML data.
+func validatePluginData(plug *Plugin, filepath string) error {
+	if !validPluginName.MatchString(plug.Metadata.Name) {
+		return fmt.Errorf("invalid plugin name at %q", filepath)
+	}
+	// We could also validate SemVer, executable, and other fields should we so choose.
+	return nil
+}
+
+func detectDuplicates(plugs []*Plugin) error {
+	names := map[string]string{}
+
+	for _, plug := range plugs {
+		if oldpath, ok := names[plug.Metadata.Name]; ok {
+			return fmt.Errorf(
+				"two plugins claim the name %q at %q and %q",
+				plug.Metadata.Name,
+				oldpath,
+				plug.Dir,
+			)
+		}
+		names[plug.Metadata.Name] = plug.Dir
+	}
+
+	return nil
 }
 
 // LoadDir loads a plugin from the given directory.
 func LoadDir(dirname string) (*Plugin, error) {
-	data, err := ioutil.ReadFile(filepath.Join(dirname, pluginFileName))
+	pluginfile := filepath.Join(dirname, PluginFileName)
+	data, err := ioutil.ReadFile(pluginfile)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "failed to read plugin at %q", pluginfile)
 	}
 
 	plug := &Plugin{Dir: dirname}
-	if err := yaml.Unmarshal(data, &plug.Metadata); err != nil {
-		return nil, err
+	if err := yaml.UnmarshalStrict(data, &plug.Metadata); err != nil {
+		return nil, errors.Wrapf(err, "failed to load plugin at %q", pluginfile)
 	}
-	return plug, nil
+	return plug, validatePluginData(plug, pluginfile)
 }
 
 // LoadAll loads all plugins found beneath the base directory.
@@ -131,10 +218,10 @@ func LoadDir(dirname string) (*Plugin, error) {
 func LoadAll(basedir string) ([]*Plugin, error) {
 	plugins := []*Plugin{}
 	// We want basedir/*/plugin.yaml
-	scanpath := filepath.Join(basedir, "*", pluginFileName)
+	scanpath := filepath.Join(basedir, "*", PluginFileName)
 	matches, err := filepath.Glob(scanpath)
 	if err != nil {
-		return plugins, err
+		return plugins, errors.Wrapf(err, "failed to find plugins in %q", scanpath)
 	}
 
 	if matches == nil {
@@ -149,7 +236,7 @@ func LoadAll(basedir string) ([]*Plugin, error) {
 		}
 		plugins = append(plugins, p)
 	}
-	return plugins, nil
+	return plugins, detectDuplicates(plugins)
 }
 
 // FindPlugins returns a list of YAML files that describe plugins.
@@ -169,32 +256,11 @@ func FindPlugins(plugdirs string) ([]*Plugin, error) {
 // SetupPluginEnv prepares os.Env for plugins. It operates on os.Env because
 // the plugin subsystem itself needs access to the environment variables
 // created here.
-func SetupPluginEnv(settings helm_env.EnvSettings,
-	shortName, base string) {
-	for key, val := range map[string]string{
-		"HELM_PLUGIN_NAME": shortName,
-		"HELM_PLUGIN_DIR":  base,
-		"HELM_BIN":         os.Args[0],
-
-		// Set vars that may not have been set, and save client the
-		// trouble of re-parsing.
-		"HELM_PLUGIN": settings.PluginDirs(),
-		"HELM_HOME":   settings.Home.String(),
-
-		// Set vars that convey common information.
-		"HELM_PATH_REPOSITORY":       settings.Home.Repository(),
-		"HELM_PATH_REPOSITORY_FILE":  settings.Home.RepositoryFile(),
-		"HELM_PATH_CACHE":            settings.Home.Cache(),
-		"HELM_PATH_LOCAL_REPOSITORY": settings.Home.LocalRepository(),
-		"HELM_PATH_STARTER":          settings.Home.Starters(),
-
-		"TILLER_HOST":      settings.TillerHost,
-		"TILLER_NAMESPACE": settings.TillerNamespace,
-	} {
+func SetupPluginEnv(settings *cli.EnvSettings, name, base string) {
+	env := settings.EnvVars()
+	env["HELM_PLUGIN_NAME"] = name
+	env["HELM_PLUGIN_DIR"] = base
+	for key, val := range env {
 		os.Setenv(key, val)
-	}
-
-	if settings.Debug {
-		os.Setenv("HELM_DEBUG", "1")
 	}
 }

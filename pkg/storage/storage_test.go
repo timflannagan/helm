@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,15 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package storage // import "k8s.io/helm/pkg/storage"
+package storage // import "helm.sh/helm/v3/pkg/storage"
 
 import (
 	"fmt"
 	"reflect"
 	"testing"
 
-	rspb "k8s.io/helm/pkg/proto/hapi/release"
-	"k8s.io/helm/pkg/storage/driver"
+	rspb "helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v3/pkg/storage/driver"
 )
 
 func TestStorageCreate(t *testing.T) {
@@ -43,7 +43,7 @@ func TestStorageCreate(t *testing.T) {
 
 	// verify the fetched and created release are the same
 	if !reflect.DeepEqual(rls, res) {
-		t.Fatalf("Expected %q, got %q", rls, res)
+		t.Fatalf("Expected %v, got %v", rls, res)
 	}
 }
 
@@ -55,13 +55,13 @@ func TestStorageUpdate(t *testing.T) {
 	rls := ReleaseTestData{
 		Name:    "angry-beaver",
 		Version: 1,
-		Status:  rspb.Status_DEPLOYED,
+		Status:  rspb.StatusDeployed,
 	}.ToRelease()
 
 	assertErrNil(t.Fatal, storage.Create(rls), "StoreRelease")
 
 	// modify the release
-	rls.Info.Status.Code = rspb.Status_DELETED
+	rls.Info.Status = rspb.StatusUninstalled
 	assertErrNil(t.Fatal, storage.Update(rls), "UpdateRelease")
 
 	// retrieve the updated release
@@ -70,7 +70,7 @@ func TestStorageUpdate(t *testing.T) {
 
 	// verify updated and fetched releases are the same.
 	if !reflect.DeepEqual(rls, res) {
-		t.Fatalf("Expected %q, got %q", rls, res)
+		t.Fatalf("Expected %v, got %v", rls, res)
 	}
 }
 
@@ -97,7 +97,7 @@ func TestStorageDelete(t *testing.T) {
 
 	// verify updated and fetched releases are the same.
 	if !reflect.DeepEqual(rls, res) {
-		t.Fatalf("Expected %q, got %q", rls, res)
+		t.Fatalf("Expected %v, got %v", rls, res)
 	}
 
 	hist, err := storage.History(rls.Name)
@@ -122,13 +122,13 @@ func TestStorageList(t *testing.T) {
 	// setup storage with test releases
 	setup := func() {
 		// release records
-		rls0 := ReleaseTestData{Name: "happy-catdog", Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls1 := ReleaseTestData{Name: "livid-human", Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls2 := ReleaseTestData{Name: "relaxed-cat", Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls3 := ReleaseTestData{Name: "hungry-hippo", Status: rspb.Status_DEPLOYED}.ToRelease()
-		rls4 := ReleaseTestData{Name: "angry-beaver", Status: rspb.Status_DEPLOYED}.ToRelease()
-		rls5 := ReleaseTestData{Name: "opulent-frog", Status: rspb.Status_DELETED}.ToRelease()
-		rls6 := ReleaseTestData{Name: "happy-liger", Status: rspb.Status_DELETED}.ToRelease()
+		rls0 := ReleaseTestData{Name: "happy-catdog", Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: "livid-human", Status: rspb.StatusSuperseded}.ToRelease()
+		rls2 := ReleaseTestData{Name: "relaxed-cat", Status: rspb.StatusSuperseded}.ToRelease()
+		rls3 := ReleaseTestData{Name: "hungry-hippo", Status: rspb.StatusDeployed}.ToRelease()
+		rls4 := ReleaseTestData{Name: "angry-beaver", Status: rspb.StatusDeployed}.ToRelease()
+		rls5 := ReleaseTestData{Name: "opulent-frog", Status: rspb.StatusUninstalled}.ToRelease()
+		rls6 := ReleaseTestData{Name: "happy-liger", Status: rspb.StatusUninstalled}.ToRelease()
 
 		// create the release records in the storage
 		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'rls0'")
@@ -145,9 +145,9 @@ func TestStorageList(t *testing.T) {
 		NumExpected int
 		ListFunc    func() ([]*rspb.Release, error)
 	}{
-		{"ListDeleted", 2, storage.ListDeleted},
 		{"ListDeployed", 2, storage.ListDeployed},
 		{"ListReleases", 7, storage.ListReleases},
+		{"ListUninstalled", 2, storage.ListUninstalled},
 	}
 
 	setup()
@@ -169,15 +169,15 @@ func TestStorageDeployed(t *testing.T) {
 	storage := Init(driver.NewMemory())
 
 	const name = "angry-bird"
-	const vers = int32(4)
+	const vers = 4
 
 	// setup storage with test releases
 	setup := func() {
 		// release records
-		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.Status_DEPLOYED}.ToRelease()
+		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.StatusSuperseded}.ToRelease()
+		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.StatusSuperseded}.ToRelease()
+		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.StatusDeployed}.ToRelease()
 
 		// create the release records in the storage
 		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'angry-bird' (v1)")
@@ -200,8 +200,48 @@ func TestStorageDeployed(t *testing.T) {
 		t.Fatalf("Expected release name %q, actual %q\n", name, rls.Name)
 	case rls.Version != vers:
 		t.Fatalf("Expected release version %d, actual %d\n", vers, rls.Version)
-	case rls.Info.Status.Code != rspb.Status_DEPLOYED:
-		t.Fatalf("Expected release status 'DEPLOYED', actual %s\n", rls.Info.Status.Code)
+	case rls.Info.Status != rspb.StatusDeployed:
+		t.Fatalf("Expected release status 'DEPLOYED', actual %s\n", rls.Info.Status.String())
+	}
+}
+
+func TestStorageDeployedWithCorruption(t *testing.T) {
+	storage := Init(driver.NewMemory())
+
+	const name = "angry-bird"
+	const vers = int(4)
+
+	// setup storage with test releases
+	setup := func() {
+		// release records (notice odd order and corruption)
+		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: name, Version: 4, Status: rspb.StatusDeployed}.ToRelease()
+		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.StatusSuperseded}.ToRelease()
+		rls3 := ReleaseTestData{Name: name, Version: 2, Status: rspb.StatusDeployed}.ToRelease()
+
+		// create the release records in the storage
+		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'angry-bird' (v1)")
+		assertErrNil(t.Fatal, storage.Create(rls1), "Storing release 'angry-bird' (v2)")
+		assertErrNil(t.Fatal, storage.Create(rls2), "Storing release 'angry-bird' (v3)")
+		assertErrNil(t.Fatal, storage.Create(rls3), "Storing release 'angry-bird' (v4)")
+	}
+
+	setup()
+
+	rls, err := storage.Deployed(name)
+	if err != nil {
+		t.Fatalf("Failed to query for deployed release: %s\n", err)
+	}
+
+	switch {
+	case rls == nil:
+		t.Fatalf("Release is nil")
+	case rls.Name != name:
+		t.Fatalf("Expected release name %q, actual %q\n", name, rls.Name)
+	case rls.Version != vers:
+		t.Fatalf("Expected release version %d, actual %d\n", vers, rls.Version)
+	case rls.Info.Status != rspb.StatusDeployed:
+		t.Fatalf("Expected release status 'DEPLOYED', actual %s\n", rls.Info.Status.String())
 	}
 }
 
@@ -213,10 +253,10 @@ func TestStorageHistory(t *testing.T) {
 	// setup storage with test releases
 	setup := func() {
 		// release records
-		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.Status_DEPLOYED}.ToRelease()
+		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.StatusSuperseded}.ToRelease()
+		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.StatusSuperseded}.ToRelease()
+		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.StatusDeployed}.ToRelease()
 
 		// create the release records in the storage
 		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'angry-bird' (v1)")
@@ -248,10 +288,10 @@ func TestStorageRemoveLeastRecent(t *testing.T) {
 	// setup storage with test releases
 	setup := func() {
 		// release records
-		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.Status_DEPLOYED}.ToRelease()
+		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.StatusSuperseded}.ToRelease()
+		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.StatusSuperseded}.ToRelease()
+		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.StatusDeployed}.ToRelease()
 
 		// create the release records in the storage
 		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'angry-bird' (v1)")
@@ -270,7 +310,7 @@ func TestStorageRemoveLeastRecent(t *testing.T) {
 	}
 
 	storage.MaxHistory = 3
-	rls5 := ReleaseTestData{Name: name, Version: 5, Status: rspb.Status_DEPLOYED}.ToRelease()
+	rls5 := ReleaseTestData{Name: name, Version: 5, Status: rspb.StatusDeployed}.ToRelease()
 	assertErrNil(t.Fatal, storage.Create(rls5), "Storing release 'angry-bird' (v5)")
 
 	// On inserting the 5th record, we expect two records to be pruned from history.
@@ -286,9 +326,60 @@ func TestStorageRemoveLeastRecent(t *testing.T) {
 
 	// We expect the existing records to be 3, 4, and 5.
 	for i, item := range hist {
-		v := int(item.Version)
+		v := item.Version
 		if expect := i + 3; v != expect {
 			t.Errorf("Expected release %d, got %d", expect, v)
+		}
+	}
+}
+
+func TestStorageDontDeleteDeployed(t *testing.T) {
+	storage := Init(driver.NewMemory())
+	storage.Log = t.Logf
+	storage.MaxHistory = 3
+
+	const name = "angry-bird"
+
+	// setup storage with test releases
+	setup := func() {
+		// release records
+		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.StatusDeployed}.ToRelease()
+		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.StatusFailed}.ToRelease()
+		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.StatusFailed}.ToRelease()
+
+		// create the release records in the storage
+		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'angry-bird' (v1)")
+		assertErrNil(t.Fatal, storage.Create(rls1), "Storing release 'angry-bird' (v2)")
+		assertErrNil(t.Fatal, storage.Create(rls2), "Storing release 'angry-bird' (v3)")
+		assertErrNil(t.Fatal, storage.Create(rls3), "Storing release 'angry-bird' (v4)")
+	}
+	setup()
+
+	rls5 := ReleaseTestData{Name: name, Version: 5, Status: rspb.StatusFailed}.ToRelease()
+	assertErrNil(t.Fatal, storage.Create(rls5), "Storing release 'angry-bird' (v5)")
+
+	// On inserting the 5th record, we expect a total of 3 releases, but we expect version 2
+	// (the only deployed release), to still exist
+	hist, err := storage.History(name)
+	if err != nil {
+		t.Fatal(err)
+	} else if len(hist) != storage.MaxHistory {
+		for _, item := range hist {
+			t.Logf("%s %v", item.Name, item.Version)
+		}
+		t.Fatalf("expected %d items in history, got %d", storage.MaxHistory, len(hist))
+	}
+
+	expectedVersions := map[int]bool{
+		2: true,
+		4: true,
+		5: true,
+	}
+
+	for _, item := range hist {
+		if !expectedVersions[item.Version] {
+			t.Errorf("Release version %d, found when not expected", item.Version)
 		}
 	}
 }
@@ -301,10 +392,10 @@ func TestStorageLast(t *testing.T) {
 	// Set up storage with test releases.
 	setup := func() {
 		// release records
-		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.Status_SUPERSEDED}.ToRelease()
-		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.Status_FAILED}.ToRelease()
+		rls0 := ReleaseTestData{Name: name, Version: 1, Status: rspb.StatusSuperseded}.ToRelease()
+		rls1 := ReleaseTestData{Name: name, Version: 2, Status: rspb.StatusSuperseded}.ToRelease()
+		rls2 := ReleaseTestData{Name: name, Version: 3, Status: rspb.StatusSuperseded}.ToRelease()
+		rls3 := ReleaseTestData{Name: name, Version: 4, Status: rspb.StatusFailed}.ToRelease()
 
 		// create the release records in the storage
 		assertErrNil(t.Fatal, storage.Create(rls0), "Storing release 'angry-bird' (v1)")
@@ -327,10 +418,10 @@ func TestStorageLast(t *testing.T) {
 
 type ReleaseTestData struct {
 	Name      string
-	Version   int32
+	Version   int
 	Manifest  string
 	Namespace string
-	Status    rspb.Status_Code
+	Status    rspb.Status
 }
 
 func (test ReleaseTestData) ToRelease() *rspb.Release {
@@ -339,7 +430,7 @@ func (test ReleaseTestData) ToRelease() *rspb.Release {
 		Version:   test.Version,
 		Manifest:  test.Manifest,
 		Namespace: test.Namespace,
-		Info:      &rspb.Info{Status: &rspb.Status{Code: test.Status}},
+		Info:      &rspb.Info{Status: test.Status},
 	}
 }
 

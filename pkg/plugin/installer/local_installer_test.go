@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package installer // import "k8s.io/helm/pkg/plugin/installer"
+package installer // import "helm.sh/helm/v3/pkg/plugin/installer"
 
 import (
 	"io/ioutil"
@@ -21,23 +21,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"k8s.io/helm/pkg/helm/helmpath"
+	"helm.sh/helm/v3/pkg/helmpath"
 )
 
 var _ Installer = new(LocalInstaller)
 
 func TestLocalInstaller(t *testing.T) {
-	hh, err := ioutil.TempDir("", "helm-home-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(hh)
-
-	home := helmpath.Home(hh)
-	if err := os.MkdirAll(home.Plugins(), 0755); err != nil {
-		t.Fatalf("Could not create %s: %s", home.Plugins(), err)
-	}
-
 	// Make a temp dir
 	tdir, err := ioutil.TempDir("", "helm-installer-")
 	if err != nil {
@@ -48,17 +37,17 @@ func TestLocalInstaller(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	source := "../testdata/plugdir/echo"
-	i, err := NewForSource(source, "", home)
+	source := "../testdata/plugdir/good/echo"
+	i, err := NewForSource(source, "")
 	if err != nil {
-		t.Errorf("unexpected error: %s", err)
+		t.Fatalf("unexpected error: %s", err)
 	}
 
 	if err := Install(i); err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
-	if i.Path() != home.Path("plugins", "echo") {
-		t.Errorf("expected path '$HELM_HOME/plugins/helm-env', got %q", i.Path())
+	if i.Path() != helmpath.DataPath("plugins", "echo") {
+		t.Fatalf("expected path '$XDG_CONFIG_HOME/helm/plugins/helm-env', got %q", i.Path())
 	}
 }

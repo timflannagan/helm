@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -13,36 +13,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package installer // import "k8s.io/helm/pkg/plugin/installer"
+package installer // import "helm.sh/helm/v3/pkg/plugin/installer"
 
 import (
-	"os"
 	"path/filepath"
 
-	"k8s.io/helm/pkg/helm/helmpath"
+	"helm.sh/helm/v3/pkg/helmpath"
 )
 
 type base struct {
 	// Source is the reference to a plugin
 	Source string
-	// HelmHome is the $HELM_HOME directory
-	HelmHome helmpath.Home
 }
 
-func newBase(source string, home helmpath.Home) base {
-	return base{source, home}
+func newBase(source string) base {
+	return base{source}
 }
 
-// link creates a symlink from the plugin source to $HELM_HOME.
-func (b *base) link(from string) error {
-	debug("symlinking %s to %s", from, b.Path())
-	return os.Symlink(from, b.Path())
-}
-
-// Path is where the plugin will be symlinked to.
+// Path is where the plugin will be installed.
 func (b *base) Path() string {
 	if b.Source == "" {
 		return ""
 	}
-	return filepath.Join(b.HelmHome.Plugins(), filepath.Base(b.Source))
+	return helmpath.DataPath("plugins", filepath.Base(b.Source))
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/*Package engine implements the Go template engine as a Tiller Engine.
+/*Package engine implements the Go text template engine as needed for Helm.
 
-Tiller provides a simple interface for taking a Chart and rendering its templates.
-The 'engine' package implements this interface using Go's built-in 'text/template'
-package.
+When Helm renders templates it does so with additional functions and different
+modes (e.g., strict, lint mode). This package handles the helm specific
+implementation.
 */
-package engine // import "k8s.io/helm/pkg/engine"
+package engine // import "helm.sh/helm/v3/pkg/engine"

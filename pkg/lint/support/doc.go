@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,4 +19,4 @@ limitations under the License.
 Linting is the process of testing charts for errors or warnings regarding
 formatting, compilation, or standards compliance.
 */
-package support // import "k8s.io/helm/pkg/lint/support"
+package support // import "helm.sh/helm/v3/pkg/lint/support"

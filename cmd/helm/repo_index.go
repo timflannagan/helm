@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,15 @@ limitations under the License.
 package main
 
 import (
-	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
-	"k8s.io/helm/pkg/repo"
+	"helm.sh/helm/v3/cmd/helm/require"
+	"helm.sh/helm/v3/pkg/repo"
 )
 
 const repoIndexDesc = `
@@ -37,39 +39,34 @@ flag. In this case, the charts found in the current directory will be merged
 into the existing index, with local charts taking priority over existing charts.
 `
 
-type repoIndexCmd struct {
+type repoIndexOptions struct {
 	dir   string
 	url   string
-	out   io.Writer
 	merge string
 }
 
 func newRepoIndexCmd(out io.Writer) *cobra.Command {
-	index := &repoIndexCmd{out: out}
+	o := &repoIndexOptions{}
 
 	cmd := &cobra.Command{
-		Use:   "index [flags] [DIR]",
+		Use:   "index [DIR]",
 		Short: "generate an index file given a directory containing packaged charts",
 		Long:  repoIndexDesc,
+		Args:  require.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkArgsLength(len(args), "path to a directory"); err != nil {
-				return err
-			}
-
-			index.dir = args[0]
-
-			return index.run()
+			o.dir = args[0]
+			return o.run(out)
 		},
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&index.url, "url", "", "url of chart repository")
-	f.StringVar(&index.merge, "merge", "", "merge the generated index into the given index")
+	f.StringVar(&o.url, "url", "", "url of chart repository")
+	f.StringVar(&o.merge, "merge", "", "merge the generated index into the given index")
 
 	return cmd
 }
 
-func (i *repoIndexCmd) run() error {
+func (i *repoIndexOptions) run(out io.Writer) error {
 	path, err := filepath.Abs(i.dir)
 	if err != nil {
 		return err
@@ -86,12 +83,19 @@ func index(dir, url, mergeTo string) error {
 		return err
 	}
 	if mergeTo != "" {
-		i2, err := repo.LoadIndexFile(mergeTo)
-		if err != nil {
-			return fmt.Errorf("Merge failed: %s", err)
+		// if index.yaml is missing then create an empty one to merge into
+		var i2 *repo.IndexFile
+		if _, err := os.Stat(mergeTo); os.IsNotExist(err) {
+			i2 = repo.NewIndexFile()
+			i2.WriteFile(mergeTo, 0644)
+		} else {
+			i2, err = repo.LoadIndexFile(mergeTo)
+			if err != nil {
+				return errors.Wrap(err, "merge failed")
+			}
 		}
 		i.Merge(i2)
 	}
 	i.SortEntries()
-	return i.WriteFile(out, 0755)
+	return i.WriteFile(out, 0644)
 }

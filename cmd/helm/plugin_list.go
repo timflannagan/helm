@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -18,43 +18,48 @@ package main
 import (
 	"fmt"
 	"io"
-
-	"k8s.io/helm/pkg/helm/helmpath"
+	"strings"
 
 	"github.com/gosuri/uitable"
 	"github.com/spf13/cobra"
+
+	"helm.sh/helm/v3/pkg/plugin"
 )
 
-type pluginListCmd struct {
-	home helmpath.Home
-	out  io.Writer
-}
-
 func newPluginListCmd(out io.Writer) *cobra.Command {
-	pcmd := &pluginListCmd{out: out}
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "list installed Helm plugins",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "list installed Helm plugins",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			pcmd.home = settings.Home
-			return pcmd.run()
+			debug("pluginDirs: %s", settings.PluginsDirectory)
+			plugins, err := plugin.FindPlugins(settings.PluginsDirectory)
+			if err != nil {
+				return err
+			}
+
+			table := uitable.New()
+			table.AddRow("NAME", "VERSION", "DESCRIPTION")
+			for _, p := range plugins {
+				table.AddRow(p.Metadata.Name, p.Metadata.Version, p.Metadata.Description)
+			}
+			fmt.Fprintln(out, table)
+			return nil
 		},
 	}
 	return cmd
 }
 
-func (pcmd *pluginListCmd) run() error {
-	debug("pluginDirs: %s", settings.PluginDirs())
-	plugins, err := findPlugins(settings.PluginDirs())
-	if err != nil {
-		return err
+// Provide dynamic auto-completion for plugin names
+func compListPlugins(toComplete string) []string {
+	var pNames []string
+	plugins, err := plugin.FindPlugins(settings.PluginsDirectory)
+	if err == nil {
+		for _, p := range plugins {
+			if strings.HasPrefix(p.Metadata.Name, toComplete) {
+				pNames = append(pNames, p.Metadata.Name)
+			}
+		}
 	}
-
-	table := uitable.New()
-	table.AddRow("NAME", "VERSION", "DESCRIPTION")
-	for _, p := range plugins {
-		table.AddRow(p.Metadata.Name, p.Metadata.Version, p.Metadata.Description)
-	}
-	fmt.Fprintln(pcmd.out, table)
-	return nil
+	return pNames
 }

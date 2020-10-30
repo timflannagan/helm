@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,23 +17,24 @@ limitations under the License.
 package repo
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
+	"bytes"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/Masterminds/semver"
-	"github.com/ghodss/yaml"
+	"github.com/Masterminds/semver/v3"
+	"github.com/pkg/errors"
+	"sigs.k8s.io/yaml"
 
-	"k8s.io/helm/pkg/chartutil"
-	"k8s.io/helm/pkg/proto/hapi/chart"
-	"k8s.io/helm/pkg/provenance"
-	"k8s.io/helm/pkg/urlutil"
+	"helm.sh/helm/v3/internal/fileutil"
+	"helm.sh/helm/v3/internal/urlutil"
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/provenance"
 )
 
 var indexPath = "index.yaml"
@@ -76,6 +77,8 @@ func (c ChartVersions) Less(a, b int) bool {
 
 // IndexFile represents the index file in a chart repository
 type IndexFile struct {
+	// This is used ONLY for validation against chartmuseum's index files and is discarded after validation.
+	ServerInfo map[string]interface{}   `json:"serverInfo,omitempty"`
 	APIVersion string                   `json:"apiVersion"`
 	Generated  time.Time                `json:"generated"`
 	Entries    map[string]ChartVersions `json:"entries"`
@@ -110,7 +113,7 @@ func (i IndexFile) Add(md *chart.Metadata, filename, baseURL, digest string) {
 		_, file := filepath.Split(filename)
 		u, err = urlutil.URLJoin(baseURL, file)
 		if err != nil {
-			u = filepath.Join(baseURL, file)
+			u = path.Join(baseURL, file)
 		}
 	}
 	cr := &ChartVersion{
@@ -146,7 +149,8 @@ func (i IndexFile) SortEntries() {
 
 // Get returns the ChartVersion for the given name.
 //
-// If version is empty, this will return the chart with the highest version.
+// If version is empty, this will return the chart with the latest stable version,
+// prerelease versions will be skipped.
 func (i IndexFile) Get(name, version string) (*ChartVersion, error) {
 	vs, ok := i.Entries[name]
 	if !ok {
@@ -157,13 +161,22 @@ func (i IndexFile) Get(name, version string) (*ChartVersion, error) {
 	}
 
 	var constraint *semver.Constraints
-	if len(version) == 0 {
+	if version == "" {
 		constraint, _ = semver.NewConstraint("*")
 	} else {
 		var err error
 		constraint, err = semver.NewConstraint(version)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	// when customer input exact version, check whether have exact match one first
+	if len(version) != 0 {
+		for _, ver := range vs {
+			if version == ver.Version {
+				return ver, nil
+			}
 		}
 	}
 
@@ -177,7 +190,7 @@ func (i IndexFile) Get(name, version string) (*ChartVersion, error) {
 			return ver, nil
 		}
 	}
-	return nil, fmt.Errorf("No chart version found for %s-%s", name, version)
+	return nil, errors.Errorf("no chart version found for %s-%s", name, version)
 }
 
 // WriteFile writes an index file to the given destination path.
@@ -188,7 +201,7 @@ func (i IndexFile) WriteFile(dest string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(dest, b, mode)
+	return fileutil.AtomicWriteFile(dest, bytes.NewReader(b), mode)
 }
 
 // Merge merges the given index file into this index.
@@ -210,8 +223,6 @@ func (i *IndexFile) Merge(f *IndexFile) {
 	}
 }
 
-// Need both JSON and YAML annotations until we get rid of gopkg.in/yaml.v2
-
 // ChartVersion represents a chart entry in the IndexFile
 type ChartVersion struct {
 	*chart.Metadata
@@ -219,6 +230,23 @@ type ChartVersion struct {
 	Created time.Time `json:"created,omitempty"`
 	Removed bool      `json:"removed,omitempty"`
 	Digest  string    `json:"digest,omitempty"`
+
+	// ChecksumDeprecated is deprecated in Helm 3, and therefore ignored. Helm 3 replaced
+	// this with Digest. However, with a strict YAML parser enabled, a field must be
+	// present on the struct for backwards compatibility.
+	ChecksumDeprecated string `json:"checksum,omitempty"`
+
+	// EngineDeprecated is deprecated in Helm 3, and therefore ignored. However, with a strict
+	// YAML parser enabled, this field must be present.
+	EngineDeprecated string `json:"engine,omitempty"`
+
+	// TillerVersionDeprecated is deprecated in Helm 3, and therefore ignored. However, with a strict
+	// YAML parser enabled, this field must be present.
+	TillerVersionDeprecated string `json:"tillerVersion,omitempty"`
+
+	// URLDeprecated is deprectaed in Helm 3, superseded by URLs. It is ignored. However,
+	// with a strict YAML parser enabled, this must be present on the struct.
+	URLDeprecated string `json:"url,omitempty"`
 }
 
 // IndexDirectory reads a (flat) directory and generates an index.
@@ -246,12 +274,14 @@ func IndexDirectory(dir, baseURL string) (*IndexFile, error) {
 
 		var parentDir string
 		parentDir, fname = filepath.Split(fname)
+		// filepath.Split appends an extra slash to the end of parentDir. We want to strip that out.
+		parentDir = strings.TrimSuffix(parentDir, string(os.PathSeparator))
 		parentURL, err := urlutil.URLJoin(baseURL, parentDir)
 		if err != nil {
-			parentURL = filepath.Join(baseURL, parentDir)
+			parentURL = path.Join(baseURL, parentDir)
 		}
 
-		c, err := chartutil.Load(arch)
+		c, err := loader.Load(arch)
 		if err != nil {
 			// Assume this is not a chart.
 			continue
@@ -270,60 +300,12 @@ func IndexDirectory(dir, baseURL string) (*IndexFile, error) {
 // This will fail if API Version is not set (ErrNoAPIVersion) or if the unmarshal fails.
 func loadIndex(data []byte) (*IndexFile, error) {
 	i := &IndexFile{}
-	if err := yaml.Unmarshal(data, i); err != nil {
+	if err := yaml.UnmarshalStrict(data, i); err != nil {
 		return i, err
 	}
 	i.SortEntries()
 	if i.APIVersion == "" {
-		// When we leave Beta, we should remove legacy support and just
-		// return this error:
-		//return i, ErrNoAPIVersion
-		return loadUnversionedIndex(data)
+		return i, ErrNoAPIVersion
 	}
 	return i, nil
-}
-
-// unversionedEntry represents a deprecated pre-Alpha.5 format.
-//
-// This will be removed prior to v2.0.0
-type unversionedEntry struct {
-	Checksum  string          `json:"checksum"`
-	URL       string          `json:"url"`
-	Chartfile *chart.Metadata `json:"chartfile"`
-}
-
-// loadUnversionedIndex loads a pre-Alpha.5 index.yaml file.
-//
-// This format is deprecated. This function will be removed prior to v2.0.0.
-func loadUnversionedIndex(data []byte) (*IndexFile, error) {
-	fmt.Fprintln(os.Stderr, "WARNING: Deprecated index file format. Try 'helm repo update'")
-	i := map[string]unversionedEntry{}
-
-	// This gets around an error in the YAML parser. Instead of parsing as YAML,
-	// we convert to JSON, and then decode again.
-	var err error
-	data, err = yaml.YAMLToJSON(data)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(data, &i); err != nil {
-		return nil, err
-	}
-
-	if len(i) == 0 {
-		return nil, ErrNoAPIVersion
-	}
-	ni := NewIndexFile()
-	for n, item := range i {
-		if item.Chartfile == nil || item.Chartfile.Name == "" {
-			parts := strings.Split(n, "-")
-			ver := ""
-			if len(parts) > 1 {
-				ver = strings.TrimSuffix(parts[1], ".tgz")
-			}
-			item.Chartfile = &chart.Metadata{Name: parts[0], Version: ver}
-		}
-		ni.Add(item.Chartfile, item.URL, "", item.Checksum)
-	}
-	return ni, nil
 }

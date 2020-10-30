@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,67 +17,94 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
-	"regexp"
+	"fmt"
 	"testing"
 
-	"k8s.io/helm/pkg/helm"
-	rpb "k8s.io/helm/pkg/proto/hapi/release"
+	"helm.sh/helm/v3/pkg/release"
 )
 
 func TestHistoryCmd(t *testing.T) {
-	mk := func(name string, vers int32, code rpb.Status_Code) *rpb.Release {
-		return helm.ReleaseMock(&helm.MockReleaseOptions{
-			Name:       name,
-			Version:    vers,
-			StatusCode: code,
+	mk := func(name string, vers int, status release.Status) *release.Release {
+		return release.Mock(&release.MockReleaseOptions{
+			Name:    name,
+			Version: vers,
+			Status:  status,
 		})
 	}
 
-	tests := []struct {
-		cmds string
-		desc string
-		args []string
-		resp []*rpb.Release
-		xout string
-	}{
-		{
-			cmds: "helm history RELEASE_NAME",
-			desc: "get history for release",
-			args: []string{"angry-bird"},
-			resp: []*rpb.Release{
-				mk("angry-bird", 4, rpb.Status_DEPLOYED),
-				mk("angry-bird", 3, rpb.Status_SUPERSEDED),
-				mk("angry-bird", 2, rpb.Status_SUPERSEDED),
-				mk("angry-bird", 1, rpb.Status_SUPERSEDED),
-			},
-			xout: "REVISION\tUPDATED                 \tSTATUS    \tCHART           \tDESCRIPTION \n1       \t(.*)\tSUPERSEDED\tfoo-0.1.0-beta.1\tRelease mock\n2       \t(.*)\tSUPERSEDED\tfoo-0.1.0-beta.1\tRelease mock\n3       \t(.*)\tSUPERSEDED\tfoo-0.1.0-beta.1\tRelease mock\n4       \t(.*)\tDEPLOYED  \tfoo-0.1.0-beta.1\tRelease mock\n",
+	tests := []cmdTestCase{{
+		name: "get history for release",
+		cmd:  "history angry-bird",
+		rels: []*release.Release{
+			mk("angry-bird", 4, release.StatusDeployed),
+			mk("angry-bird", 3, release.StatusSuperseded),
+			mk("angry-bird", 2, release.StatusSuperseded),
+			mk("angry-bird", 1, release.StatusSuperseded),
 		},
-		{
-			cmds: "helm history --max=MAX RELEASE_NAME",
-			desc: "get history with max limit set",
-			args: []string{"--max=2", "angry-bird"},
-			resp: []*rpb.Release{
-				mk("angry-bird", 4, rpb.Status_DEPLOYED),
-				mk("angry-bird", 3, rpb.Status_SUPERSEDED),
-			},
-			xout: "REVISION\tUPDATED                 \tSTATUS    \tCHART           \tDESCRIPTION \n3       \t(.*)\tSUPERSEDED\tfoo-0.1.0-beta.1\tRelease mock\n4       \t(.*)\tDEPLOYED  \tfoo-0.1.0-beta.1\tRelease mock\n",
+		golden: "output/history.txt",
+	}, {
+		name: "get history with max limit set",
+		cmd:  "history angry-bird --max 2",
+		rels: []*release.Release{
+			mk("angry-bird", 4, release.StatusDeployed),
+			mk("angry-bird", 3, release.StatusSuperseded),
 		},
+		golden: "output/history-limit.txt",
+	}, {
+		name: "get history with yaml output format",
+		cmd:  "history angry-bird --output yaml",
+		rels: []*release.Release{
+			mk("angry-bird", 4, release.StatusDeployed),
+			mk("angry-bird", 3, release.StatusSuperseded),
+		},
+		golden: "output/history.yaml",
+	}, {
+		name: "get history with json output format",
+		cmd:  "history angry-bird --output json",
+		rels: []*release.Release{
+			mk("angry-bird", 4, release.StatusDeployed),
+			mk("angry-bird", 3, release.StatusSuperseded),
+		},
+		golden: "output/history.json",
+	}}
+	runTestCmd(t, tests)
+}
+
+func TestHistoryOutputCompletion(t *testing.T) {
+	outputFlagCompletionTest(t, "history")
+}
+
+func revisionFlagCompletionTest(t *testing.T, cmdName string) {
+	mk := func(name string, vers int, status release.Status) *release.Release {
+		return release.Mock(&release.MockReleaseOptions{
+			Name:    name,
+			Version: vers,
+			Status:  status,
+		})
 	}
 
-	var buf bytes.Buffer
-	for _, tt := range tests {
-		frc := &helm.FakeClient{Rels: tt.resp}
-		cmd := newHistoryCmd(frc, &buf)
-		cmd.ParseFlags(tt.args)
-
-		if err := cmd.RunE(cmd, tt.args); err != nil {
-			t.Fatalf("%q\n\t%s: unexpected error: %v", tt.cmds, tt.desc, err)
-		}
-		re := regexp.MustCompile(tt.xout)
-		if !re.Match(buf.Bytes()) {
-			t.Fatalf("%q\n\t%s:\nexpected\n\t%q\nactual\n\t%q", tt.cmds, tt.desc, tt.xout, buf.String())
-		}
-		buf.Reset()
+	releases := []*release.Release{
+		mk("musketeers", 11, release.StatusDeployed),
+		mk("musketeers", 10, release.StatusSuperseded),
+		mk("musketeers", 9, release.StatusSuperseded),
+		mk("musketeers", 8, release.StatusSuperseded),
 	}
+
+	tests := []cmdTestCase{{
+		name:   "completion for revision flag",
+		cmd:    fmt.Sprintf("__complete %s musketeers --revision ''", cmdName),
+		rels:   releases,
+		golden: "output/revision-comp.txt",
+	}, {
+		name:   "completion for revision flag with too few args",
+		cmd:    fmt.Sprintf("__complete %s --revision ''", cmdName),
+		rels:   releases,
+		golden: "output/revision-wrong-args-comp.txt",
+	}, {
+		name:   "completion for revision flag with too many args",
+		cmd:    fmt.Sprintf("__complete %s three musketeers --revision ''", cmdName),
+		rels:   releases,
+		golden: "output/revision-wrong-args-comp.txt",
+	}}
+	runTestCmd(t, tests)
 }

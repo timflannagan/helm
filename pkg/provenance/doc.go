@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -34,4 +34,4 @@ and using `gpg --verify`, `keybase pgp verify`, or similar:
 	gpg: Signature made Mon Jul 25 17:23:44 2016 MDT using RSA key ID 1FC18762
 	gpg: Good signature from "Helm Testing (This key should only be used for testing. DO NOT TRUST.) <helm-testing@helm.sh>" [ultimate]
 */
-package provenance // import "k8s.io/helm/pkg/provenance"
+package provenance // import "helm.sh/helm/v3/pkg/provenance"

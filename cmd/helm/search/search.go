@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,14 +23,14 @@ to find matches.
 package search
 
 import (
-	"errors"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/Masterminds/semver"
-	"k8s.io/helm/pkg/repo"
+	"github.com/Masterminds/semver/v3"
+
+	"helm.sh/helm/v3/pkg/repo"
 )
 
 // Result is a search result.
@@ -51,7 +51,7 @@ type Index struct {
 
 const sep = "\v"
 
-// NewIndex creats a new Index.
+// NewIndex creates a new Index.
 func NewIndex() *Index {
 	return &Index{lines: map[string]string{}, charts: map[string]*repo.ChartVersion{}}
 }
@@ -175,15 +175,6 @@ func (i *Index) SearchRegexp(re string, threshold int) ([]*Result, error) {
 		}
 	}
 	return buf, nil
-}
-
-// Chart returns the ChartVersion for a particular name.
-func (i *Index) Chart(name string) (*repo.ChartVersion, error) {
-	c, ok := i.charts[name]
-	if !ok {
-		return nil, errors.New("no such chart")
-	}
-	return c, nil
 }
 
 // SortScore does an in-place sort of the results.

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,14 +16,17 @@ limitations under the License.
 package getter
 
 import (
-	"os"
 	"testing"
+
+	"helm.sh/helm/v3/pkg/cli"
 )
+
+const pluginDir = "testdata/plugins"
 
 func TestProvider(t *testing.T) {
 	p := Provider{
 		[]string{"one", "three"},
-		func(h, e, l, m string) (Getter, error) { return nil, nil },
+		func(_ ...Option) (Getter, error) { return nil, nil },
 	}
 
 	if !p.Provides("three") {
@@ -33,8 +36,8 @@ func TestProvider(t *testing.T) {
 
 func TestProviders(t *testing.T) {
 	ps := Providers{
-		{[]string{"one", "three"}, func(h, e, l, m string) (Getter, error) { return nil, nil }},
-		{[]string{"two", "four"}, func(h, e, l, m string) (Getter, error) { return nil, nil }},
+		{[]string{"one", "three"}, func(_ ...Option) (Getter, error) { return nil, nil }},
+		{[]string{"two", "four"}, func(_ ...Option) (Getter, error) { return nil, nil }},
 	}
 
 	if _, err := ps.ByScheme("one"); err != nil {
@@ -50,11 +53,8 @@ func TestProviders(t *testing.T) {
 }
 
 func TestAll(t *testing.T) {
-	oldhh := os.Getenv("HELM_HOME")
-	defer os.Setenv("HELM_HOME", oldhh)
-	os.Setenv("HELM_HOME", "")
-
-	env := hh(false)
+	env := cli.New()
+	env.PluginsDirectory = pluginDir
 
 	all := All(env)
 	if len(all) != 3 {
@@ -67,15 +67,14 @@ func TestAll(t *testing.T) {
 }
 
 func TestByScheme(t *testing.T) {
-	oldhh := os.Getenv("HELM_HOME")
-	defer os.Setenv("HELM_HOME", oldhh)
-	os.Setenv("HELM_HOME", "")
+	env := cli.New()
+	env.PluginsDirectory = pluginDir
 
-	env := hh(false)
-	if _, err := ByScheme("test", env); err != nil {
+	g := All(env)
+	if _, err := g.ByScheme("test"); err != nil {
 		t.Error(err)
 	}
-	if _, err := ByScheme("https", env); err != nil {
+	if _, err := g.ByScheme("https"); err != nil {
 		t.Error(err)
 	}
 }

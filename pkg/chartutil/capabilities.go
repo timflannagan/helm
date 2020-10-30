@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,56 +16,81 @@ limitations under the License.
 package chartutil
 
 import (
-	"fmt"
-	"runtime"
+	"k8s.io/client-go/kubernetes/scheme"
 
-	"k8s.io/apimachinery/pkg/version"
-	tversion "k8s.io/helm/pkg/proto/hapi/version"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+
+	helmversion "helm.sh/helm/v3/internal/version"
 )
 
 var (
 	// DefaultVersionSet is the default version set, which includes only Core V1 ("v1").
-	DefaultVersionSet = NewVersionSet("v1")
+	DefaultVersionSet = allKnownVersions()
 
-	// DefaultKubeVersion is the default kubernetes version
-	DefaultKubeVersion = &version.Info{
-		Major:      "1",
-		Minor:      "9",
-		GitVersion: "v1.9.0",
-		GoVersion:  runtime.Version(),
-		Compiler:   runtime.Compiler,
-		Platform:   fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+	// DefaultCapabilities is the default set of capabilities.
+	DefaultCapabilities = &Capabilities{
+		KubeVersion: KubeVersion{
+			Version: "v1.18.0",
+			Major:   "1",
+			Minor:   "18",
+		},
+		APIVersions: DefaultVersionSet,
+		HelmVersion: helmversion.Get(),
 	}
 )
 
-// Capabilities describes the capabilities of the Kubernetes cluster that Tiller is attached to.
+// Capabilities describes the capabilities of the Kubernetes cluster.
 type Capabilities struct {
-	// List of all supported API versions
+	// KubeVersion is the Kubernetes version.
+	KubeVersion KubeVersion
+	// APIversions are supported Kubernetes API versions.
 	APIVersions VersionSet
-	// KubeVerison is the Kubernetes version
-	KubeVersion *version.Info
-	// TillerVersion is the Tiller version
-	//
-	// This always comes from pkg/version.GetVersionProto().
-	TillerVersion *tversion.Version
+	// HelmVersion is the build information for this helm version
+	HelmVersion helmversion.BuildInfo
 }
+
+// KubeVersion is the Kubernetes version.
+type KubeVersion struct {
+	Version string // Kubernetes version
+	Major   string // Kubernetes major version
+	Minor   string // Kubernetes minor version
+}
+
+// String implements fmt.Stringer
+func (kv *KubeVersion) String() string { return kv.Version }
+
+// GitVersion returns the Kubernetes version string.
+//
+// Deprecated: use KubeVersion.Version.
+func (kv *KubeVersion) GitVersion() string { return kv.Version }
 
 // VersionSet is a set of Kubernetes API versions.
-type VersionSet map[string]interface{}
-
-// NewVersionSet creates a new version set from a list of strings.
-func NewVersionSet(apiVersions ...string) VersionSet {
-	vs := VersionSet{}
-	for _, v := range apiVersions {
-		vs[v] = struct{}{}
-	}
-	return vs
-}
+type VersionSet []string
 
 // Has returns true if the version string is in the set.
 //
-//	vs.Has("extensions/v1beta1")
+//	vs.Has("apps/v1")
 func (v VersionSet) Has(apiVersion string) bool {
-	_, ok := v[apiVersion]
-	return ok
+	for _, x := range v {
+		if x == apiVersion {
+			return true
+		}
+	}
+	return false
+}
+
+func allKnownVersions() VersionSet {
+	// We should register the built in extension APIs as well so CRDs are
+	// supported in the default version set. This has caused problems with `helm
+	// template` in the past, so let's be safe
+	apiextensionsv1beta1.AddToScheme(scheme.Scheme)
+	apiextensionsv1.AddToScheme(scheme.Scheme)
+
+	groups := scheme.Scheme.PrioritizedVersionsAllGroups()
+	vs := make(VersionSet, 0, len(groups))
+	for _, gv := range groups {
+		vs = append(vs, gv.String())
+	}
+	return vs
 }

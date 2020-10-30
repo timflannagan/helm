@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,222 +18,223 @@ package main
 
 import (
 	"bytes"
-	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
-	"path/filepath"
-	"regexp"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
+	shellwords "github.com/mattn/go-shellwords"
 	"github.com/spf13/cobra"
 
-	"k8s.io/helm/pkg/helm"
-	"k8s.io/helm/pkg/helm/helmpath"
-	"k8s.io/helm/pkg/proto/hapi/release"
-	"k8s.io/helm/pkg/repo"
+	"helm.sh/helm/v3/internal/test"
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/cli"
+	kubefake "helm.sh/helm/v3/pkg/kube/fake"
+	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v3/pkg/storage"
+	"helm.sh/helm/v3/pkg/storage/driver"
+	"helm.sh/helm/v3/pkg/time"
 )
 
-// releaseCmd is a command that works with a FakeClient
-type releaseCmd func(c *helm.FakeClient, out io.Writer) *cobra.Command
+func testTimestamper() time.Time { return time.Unix(242085845, 0).UTC() }
 
-// runReleaseCases runs a set of release cases through the given releaseCmd.
-func runReleaseCases(t *testing.T, tests []releaseCase, rcmd releaseCmd) {
+func init() {
+	action.Timestamper = testTimestamper
+}
 
-	var buf bytes.Buffer
+func runTestCmd(t *testing.T, tests []cmdTestCase) {
+	t.Helper()
 	for _, tt := range tests {
-		c := &helm.FakeClient{
-			Rels: tt.rels,
+		for i := 0; i <= tt.repeat; i++ {
+			t.Run(tt.name, func(t *testing.T) {
+				defer resetEnv()()
+
+				storage := storageFixture()
+				for _, rel := range tt.rels {
+					if err := storage.Create(rel); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Logf("running cmd (attempt %d): %s", i+1, tt.cmd)
+				_, out, err := executeActionCommandC(storage, tt.cmd)
+				if (err != nil) != tt.wantError {
+					t.Errorf("expected error, got '%v'", err)
+				}
+				if tt.golden != "" {
+					test.AssertGoldenString(t, out, tt.golden)
+				}
+			})
 		}
-		cmd := rcmd(c, &buf)
-		cmd.ParseFlags(tt.flags)
-		err := cmd.RunE(cmd, tt.args)
-		if (err != nil) != tt.err {
-			t.Errorf("%q. expected error, got '%v'", tt.name, err)
-		}
-		re := regexp.MustCompile(tt.expected)
-		if !re.Match(buf.Bytes()) {
-			t.Errorf("%q. expected\n%q\ngot\n%q", tt.name, tt.expected, buf.String())
-		}
-		buf.Reset()
 	}
 }
 
-// releaseCase describes a test case that works with releases.
-type releaseCase struct {
-	name  string
-	args  []string
-	flags []string
-	// expected is the string to be matched. This supports regular expressions.
-	expected string
-	err      bool
-	resp     *release.Release
-	// Rels are the available releases at the start of the test.
-	rels []*release.Release
-}
-
-// tempHelmHome sets up a Helm Home in a temp dir.
-//
-// This does not clean up the directory. You must do that yourself.
-// You  must also set helmHome yourself.
-func tempHelmHome(t *testing.T) (helmpath.Home, error) {
-	oldhome := settings.Home
-	dir, err := ioutil.TempDir("", "helm_home-")
-	if err != nil {
-		return helmpath.Home("n/"), err
-	}
-
-	settings.Home = helmpath.Home(dir)
-	if err := ensureTestHome(settings.Home, t); err != nil {
-		return helmpath.Home("n/"), err
-	}
-	settings.Home = oldhome
-	return helmpath.Home(dir), nil
-}
-
-// ensureTestHome creates a home directory like ensureHome, but without remote references.
-//
-// t is used only for logging.
-func ensureTestHome(home helmpath.Home, t *testing.T) error {
-	configDirectories := []string{home.String(), home.Repository(), home.Cache(), home.LocalRepository(), home.Plugins(), home.Starters()}
-	for _, p := range configDirectories {
-		if fi, err := os.Stat(p); err != nil {
-			if err := os.MkdirAll(p, 0755); err != nil {
-				return fmt.Errorf("Could not create %s: %s", p, err)
-			}
-		} else if !fi.IsDir() {
-			return fmt.Errorf("%s must be a directory", p)
-		}
-	}
-
-	repoFile := home.RepositoryFile()
-	if fi, err := os.Stat(repoFile); err != nil {
-		rf := repo.NewRepoFile()
-		rf.Add(&repo.Entry{
-			Name:  "charts",
-			URL:   "http://example.com/foo",
-			Cache: "charts-index.yaml",
-		}, &repo.Entry{
-			Name:  "local",
-			URL:   "http://localhost.com:7743/foo",
-			Cache: "local-index.yaml",
-		})
-		if err := rf.WriteFile(repoFile, 0644); err != nil {
-			return err
-		}
-	} else if fi.IsDir() {
-		return fmt.Errorf("%s must be a file, not a directory", repoFile)
-	}
-	if r, err := repo.LoadRepositoriesFile(repoFile); err == repo.ErrRepoOutOfDate {
-		t.Log("Updating repository file format...")
-		if err := r.WriteFile(repoFile, 0644); err != nil {
-			return err
-		}
-	}
-
-	localRepoIndexFile := home.LocalRepository(localRepositoryIndexFile)
-	if fi, err := os.Stat(localRepoIndexFile); err != nil {
-		i := repo.NewIndexFile()
-		if err := i.WriteFile(localRepoIndexFile, 0644); err != nil {
-			return err
-		}
-
-		//TODO: take this out and replace with helm update functionality
-		os.Symlink(localRepoIndexFile, home.CacheIndex("local"))
-	} else if fi.IsDir() {
-		return fmt.Errorf("%s must be a file, not a directory", localRepoIndexFile)
-	}
-
-	t.Logf("$HELM_HOME has been configured at %s.\n", settings.Home.String())
-	return nil
-
-}
-
-func TestRootCmd(t *testing.T) {
-	cleanup := resetEnv()
-	defer cleanup()
-
-	tests := []struct {
-		name   string
-		args   []string
-		envars map[string]string
-		home   string
-	}{
-		{
-			name: "defaults",
-			args: []string{"home"},
-			home: filepath.Join(os.Getenv("HOME"), "/.helm"),
-		},
-		{
-			name: "with --home set",
-			args: []string{"--home", "/foo"},
-			home: "/foo",
-		},
-		{
-			name: "subcommands with --home set",
-			args: []string{"home", "--home", "/foo"},
-			home: "/foo",
-		},
-		{
-			name:   "with $HELM_HOME set",
-			args:   []string{"home"},
-			envars: map[string]string{"HELM_HOME": "/bar"},
-			home:   "/bar",
-		},
-		{
-			name:   "subcommands with $HELM_HOME set",
-			args:   []string{"home"},
-			envars: map[string]string{"HELM_HOME": "/bar"},
-			home:   "/bar",
-		},
-		{
-			name:   "with $HELM_HOME and --home set",
-			args:   []string{"home", "--home", "/foo"},
-			envars: map[string]string{"HELM_HOME": "/bar"},
-			home:   "/foo",
-		},
-	}
-
-	// ensure not set locally
-	os.Unsetenv("HELM_HOME")
-
+func runTestActionCmd(t *testing.T, tests []cmdTestCase) {
+	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer os.Unsetenv("HELM_HOME")
+			defer resetEnv()()
 
-			for k, v := range tt.envars {
-				os.Setenv(k, v)
+			store := storageFixture()
+			for _, rel := range tt.rels {
+				store.Create(rel)
 			}
-
-			cmd := newRootCmd(tt.args)
-			cmd.SetOutput(ioutil.Discard)
-			cmd.SetArgs(tt.args)
-			cmd.Run = func(*cobra.Command, []string) {}
-			if err := cmd.Execute(); err != nil {
-				t.Errorf("unexpected error: %s", err)
+			_, out, err := executeActionCommandC(store, tt.cmd)
+			if (err != nil) != tt.wantError {
+				t.Errorf("expected error, got '%v'", err)
 			}
-
-			if settings.Home.String() != tt.home {
-				t.Errorf("expected home %q, got %q", tt.home, settings.Home)
-			}
-			homeFlag := cmd.Flag("home").Value.String()
-			homeFlag = os.ExpandEnv(homeFlag)
-			if homeFlag != tt.home {
-				t.Errorf("expected home %q, got %q", tt.home, homeFlag)
+			if tt.golden != "" {
+				test.AssertGoldenString(t, out, tt.golden)
 			}
 		})
 	}
+}
+
+func storageFixture() *storage.Storage {
+	return storage.Init(driver.NewMemory())
+}
+
+func executeActionCommandC(store *storage.Storage, cmd string) (*cobra.Command, string, error) {
+	return executeActionCommandStdinC(store, nil, cmd)
+}
+
+func executeActionCommandStdinC(store *storage.Storage, in *os.File, cmd string) (*cobra.Command, string, error) {
+	args, err := shellwords.Parse(cmd)
+	if err != nil {
+		return nil, "", err
+	}
+
+	buf := new(bytes.Buffer)
+
+	actionConfig := &action.Configuration{
+		Releases:     store,
+		KubeClient:   &kubefake.PrintingKubeClient{Out: ioutil.Discard},
+		Capabilities: chartutil.DefaultCapabilities,
+		Log:          func(format string, v ...interface{}) {},
+	}
+
+	root, err := newRootCmd(actionConfig, buf, args)
+	if err != nil {
+		return nil, "", err
+	}
+
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs(args)
+
+	oldStdin := os.Stdin
+	if in != nil {
+		root.SetIn(in)
+		os.Stdin = in
+	}
+
+	if mem, ok := store.Driver.(*driver.Memory); ok {
+		mem.SetNamespace(settings.Namespace())
+	}
+	c, err := root.ExecuteC()
+
+	result := buf.String()
+
+	os.Stdin = oldStdin
+
+	return c, result, err
+}
+
+// cmdTestCase describes a test case that works with releases.
+type cmdTestCase struct {
+	name      string
+	cmd       string
+	golden    string
+	wantError bool
+	// Rels are the available releases at the start of the test.
+	rels []*release.Release
+	// Number of repeats (in case a feature was previously flaky and the test checks
+	// it's now stably producing identical results). 0 means test is run exactly once.
+	repeat int
+}
+
+func executeActionCommand(cmd string) (*cobra.Command, string, error) {
+	return executeActionCommandC(storageFixture(), cmd)
 }
 
 func resetEnv() func() {
-	origSettings := settings
 	origEnv := os.Environ()
 	return func() {
-		settings = origSettings
+		os.Clearenv()
 		for _, pair := range origEnv {
 			kv := strings.SplitN(pair, "=", 2)
 			os.Setenv(kv[0], kv[1])
+		}
+		settings = cli.New()
+	}
+}
+
+func testChdir(t *testing.T, dir string) func() {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return func() { os.Chdir(old) }
+}
+
+func TestPluginExitCode(t *testing.T) {
+	if os.Getenv("RUN_MAIN_FOR_TESTING") == "1" {
+		os.Args = []string{"helm", "exitwith", "2"}
+
+		// We DO call helm's main() here. So this looks like a normal `helm` process.
+		main()
+
+		// As main calls os.Exit, we never reach this line.
+		// But the test called this block of code catches and verifies the exit code.
+		return
+	}
+
+	// Currently, plugins assume a Linux subsystem. Skip the execution
+	// tests until this is fixed
+	if runtime.GOOS != "windows" {
+		// Do a second run of this specific test(TestPluginExitCode) with RUN_MAIN_FOR_TESTING=1 set,
+		// So that the second run is able to run main() and this first run can verify the exit status returned by that.
+		//
+		// This technique originates from https://talks.golang.org/2014/testing.slide#23.
+		cmd := exec.Command(os.Args[0], "-test.run=TestPluginExitCode")
+		cmd.Env = append(
+			os.Environ(),
+			"RUN_MAIN_FOR_TESTING=1",
+			// See pkg/cli/environment.go for which envvars can be used for configuring these passes
+			// and also see plugin_test.go for how a plugin env can be set up.
+			// We just does the same setup as plugin_test.go via envvars
+			"HELM_PLUGINS=testdata/helmhome/helm/plugins",
+			"HELM_REPOSITORY_CONFIG=testdata/helmhome/helm/repositories.yaml",
+			"HELM_REPOSITORY_CACHE=testdata/helmhome/helm/repository",
+		)
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		err := cmd.Run()
+		exiterr, ok := err.(*exec.ExitError)
+
+		if !ok {
+			t.Fatalf("Unexpected error returned by os.Exit: %T", err)
+		}
+
+		if stdout.String() != "" {
+			t.Errorf("Expected no write to stdout: Got %q", stdout.String())
+		}
+
+		expectedStderr := "Error: plugin \"exitwith\" exited with error\n"
+		if stderr.String() != expectedStderr {
+			t.Errorf("Expected %q written to stderr: Got %q", expectedStderr, stderr.String())
+		}
+
+		if exiterr.ExitCode() != 2 {
+			t.Errorf("Expected exit code 2: Got %d", exiterr.ExitCode())
 		}
 	}
 }

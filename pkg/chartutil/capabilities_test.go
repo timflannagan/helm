@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -20,13 +20,13 @@ import (
 )
 
 func TestVersionSet(t *testing.T) {
-	vs := NewVersionSet("v1", "extensions/v1beta1")
+	vs := VersionSet{"v1", "apps/v1"}
 	if d := len(vs); d != 2 {
 		t.Errorf("Expected 2 versions, got %d", d)
 	}
 
-	if !vs.Has("extensions/v1beta1") {
-		t.Error("Expected to find extensions/v1beta1")
+	if !vs.Has("apps/v1") {
+		t.Error("Expected to find apps/v1")
 	}
 
 	if vs.Has("Spanish/inquisition") {
@@ -38,17 +38,31 @@ func TestDefaultVersionSet(t *testing.T) {
 	if !DefaultVersionSet.Has("v1") {
 		t.Error("Expected core v1 version set")
 	}
-	if d := len(DefaultVersionSet); d != 1 {
-		t.Errorf("Expected only one version, got %d", d)
+}
+
+func TestDefaultCapabilities(t *testing.T) {
+	kv := DefaultCapabilities.KubeVersion
+	if kv.String() != "v1.18.0" {
+		t.Errorf("Expected default KubeVersion.String() to be v1.18.0, got %q", kv.String())
+	}
+	if kv.Version != "v1.18.0" {
+		t.Errorf("Expected default KubeVersion.Version to be v1.18.0, got %q", kv.Version)
+	}
+	if kv.GitVersion() != "v1.18.0" {
+		t.Errorf("Expected default KubeVersion.GitVersion() to be v1.18.0, got %q", kv.Version)
+	}
+	if kv.Major != "1" {
+		t.Errorf("Expected default KubeVersion.Major to be 1, got %q", kv.Major)
+	}
+	if kv.Minor != "18" {
+		t.Errorf("Expected default KubeVersion.Minor to be 18, got %q", kv.Minor)
 	}
 }
 
-func TestCapabilities(t *testing.T) {
-	cap := Capabilities{
-		APIVersions: DefaultVersionSet,
-	}
+func TestDefaultCapabilitiesHelmVersion(t *testing.T) {
+	hv := DefaultCapabilities.HelmVersion
 
-	if !cap.APIVersions.Has("v1") {
-		t.Error("APIVersions should have v1")
+	if hv.Version != "v3.3" {
+		t.Errorf("Expected default HelmVersion to be v3.3, got %q", hv.Version)
 	}
 }

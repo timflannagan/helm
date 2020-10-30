@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,30 +17,29 @@ limitations under the License.
 package rules
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"k8s.io/helm/pkg/chartutil"
-	"k8s.io/helm/pkg/lint/support"
-	"k8s.io/helm/pkg/proto/hapi/chart"
+	"github.com/pkg/errors"
+
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/lint/support"
 )
 
 const (
-	badChartDir  = "testdata/badchartfile"
-	goodChartDir = "testdata/goodone"
+	badChartDir        = "testdata/badchartfile"
+	anotherBadChartDir = "testdata/anotherbadchartfile"
 )
 
 var (
 	badChartFilePath         = filepath.Join(badChartDir, "Chart.yaml")
-	goodChartFilePath        = filepath.Join(goodChartDir, "Chart.yaml")
 	nonExistingChartFilePath = filepath.Join(os.TempDir(), "Chart.yaml")
 )
 
-var badChart, chatLoadRrr = chartutil.LoadChartfile(badChartFilePath)
-var goodChart, _ = chartutil.LoadChartfile(goodChartFilePath)
+var badChart, _ = chartutil.LoadChartfile(badChartFilePath)
 
 // Validation functions Test
 func TestValidateChartYamlNotDirectory(t *testing.T) {
@@ -72,31 +71,13 @@ func TestValidateChartName(t *testing.T) {
 	}
 }
 
-func TestValidateChartNameDirMatch(t *testing.T) {
-	err := validateChartNameDirMatch(goodChartDir, goodChart)
-	if err != nil {
-		t.Errorf("validateChartNameDirMatch to return no error, gor a linter error")
-	}
-	// It has not name
-	err = validateChartNameDirMatch(badChartDir, badChart)
-	if err == nil {
-		t.Errorf("validatechartnamedirmatch to return a linter error, got no error")
-	}
-
-	// Wrong path
-	err = validateChartNameDirMatch(badChartDir, goodChart)
-	if err == nil {
-		t.Errorf("validatechartnamedirmatch to return a linter error, got no error")
-	}
-}
-
 func TestValidateChartVersion(t *testing.T) {
 	var failTest = []struct {
 		Version  string
 		ErrorMsg string
 	}{
 		{"", "version is required"},
-		{"0", "0 is less than or equal to 0"},
+		{"1.2.3.4", "version '1.2.3.4' is not a valid SemVer"},
 		{"waps", "'waps' is not a valid SemVer"},
 		{"-3", "'-3' is not a valid SemVer"},
 	}
@@ -117,24 +98,6 @@ func TestValidateChartVersion(t *testing.T) {
 		if err != nil {
 			t.Errorf("validateChartVersion(%s) to return no error, got a linter error", version)
 		}
-	}
-}
-
-func TestValidateChartEngine(t *testing.T) {
-	var successTest = []string{"", "gotpl"}
-
-	for _, engine := range successTest {
-		badChart.Engine = engine
-		err := validateChartEngine(badChart)
-		if err != nil {
-			t.Errorf("validateChartEngine(%s) to return no error, got a linter error %s", engine, err.Error())
-		}
-	}
-
-	badChart.Engine = "foobar"
-	err := validateChartEngine(badChart)
-	if err == nil || !strings.Contains(err.Error(), "not valid. Valid options are [gotpl") {
-		t.Errorf("validateChartEngine(%s) to return an error, got no error", badChart.Engine)
 	}
 }
 
@@ -222,28 +185,63 @@ func TestValidateChartIconURL(t *testing.T) {
 }
 
 func TestChartfile(t *testing.T) {
-	linter := support.Linter{ChartDir: badChartDir}
-	Chartfile(&linter)
-	msgs := linter.Messages
+	t.Run("Chart.yaml basic validity issues", func(t *testing.T) {
+		linter := support.Linter{ChartDir: badChartDir}
+		Chartfile(&linter)
+		msgs := linter.Messages
+		expectedNumberOfErrorMessages := 6
 
-	if len(msgs) != 4 {
-		t.Errorf("Expected 3 errors, got %d", len(msgs))
-	}
+		if len(msgs) != expectedNumberOfErrorMessages {
+			t.Errorf("Expected %d errors, got %d", expectedNumberOfErrorMessages, len(msgs))
+			return
+		}
 
-	if !strings.Contains(msgs[0].Err.Error(), "name is required") {
-		t.Errorf("Unexpected message 0: %s", msgs[0].Err)
-	}
+		if !strings.Contains(msgs[0].Err.Error(), "name is required") {
+			t.Errorf("Unexpected message 0: %s", msgs[0].Err)
+		}
 
-	if !strings.Contains(msgs[1].Err.Error(), "directory name (badchartfile) and chart name () must be the same") {
-		t.Errorf("Unexpected message 1: %s", msgs[1].Err)
-	}
+		if !strings.Contains(msgs[1].Err.Error(), "apiVersion is required. The value must be either \"v1\" or \"v2\"") {
+			t.Errorf("Unexpected message 1: %s", msgs[1].Err)
+		}
 
-	if !strings.Contains(msgs[2].Err.Error(), "version 0.0.0 is less than or equal to 0") {
-		t.Errorf("Unexpected message 2: %s", msgs[2].Err)
-	}
+		if !strings.Contains(msgs[2].Err.Error(), "version '0.0.0.0' is not a valid SemVer") {
+			t.Errorf("Unexpected message 2: %s", msgs[2].Err)
+		}
 
-	if !strings.Contains(msgs[3].Err.Error(), "icon is recommended") {
-		t.Errorf("Unexpected message 3: %s", msgs[3].Err)
-	}
+		if !strings.Contains(msgs[3].Err.Error(), "icon is recommended") {
+			t.Errorf("Unexpected message 3: %s", msgs[3].Err)
+		}
 
+		if !strings.Contains(msgs[4].Err.Error(), "chart type is not valid in apiVersion") {
+			t.Errorf("Unexpected message 4: %s", msgs[4].Err)
+		}
+
+		if !strings.Contains(msgs[5].Err.Error(), "dependencies are not valid in the Chart file with apiVersion") {
+			t.Errorf("Unexpected message 5: %s", msgs[5].Err)
+		}
+	})
+
+	t.Run("Chart.yaml validity issues due to type mismatch", func(t *testing.T) {
+		linter := support.Linter{ChartDir: anotherBadChartDir}
+		Chartfile(&linter)
+		msgs := linter.Messages
+		expectedNumberOfErrorMessages := 3
+
+		if len(msgs) != expectedNumberOfErrorMessages {
+			t.Errorf("Expected %d errors, got %d", expectedNumberOfErrorMessages, len(msgs))
+			return
+		}
+
+		if !strings.Contains(msgs[0].Err.Error(), "version should be of type string") {
+			t.Errorf("Unexpected message 0: %s", msgs[0].Err)
+		}
+
+		if !strings.Contains(msgs[1].Err.Error(), "version '7.2445e+06' is not a valid SemVer") {
+			t.Errorf("Unexpected message 1: %s", msgs[1].Err)
+		}
+
+		if !strings.Contains(msgs[2].Err.Error(), "appVersion should be of type string") {
+			t.Errorf("Unexpected message 2: %s", msgs[2].Err)
+		}
+	})
 }

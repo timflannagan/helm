@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,276 +17,166 @@ limitations under the License.
 package main
 
 import (
-	"errors"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
-	"time"
 
-	"github.com/Masterminds/semver"
 	"github.com/spf13/cobra"
 
-	"k8s.io/helm/pkg/chartutil"
-	"k8s.io/helm/pkg/engine"
-	"k8s.io/helm/pkg/proto/hapi/chart"
-	"k8s.io/helm/pkg/proto/hapi/release"
-	util "k8s.io/helm/pkg/releaseutil"
-	"k8s.io/helm/pkg/tiller"
-	"k8s.io/helm/pkg/timeconv"
-	tversion "k8s.io/helm/pkg/version"
-)
-
-const defaultDirectoryPermission = 0755
-
-var (
-	whitespaceRegex = regexp.MustCompile(`^\s*$`)
-
-	// defaultKubeVersion is the default value of --kube-version flag
-	defaultKubeVersion = fmt.Sprintf("%s.%s", chartutil.DefaultKubeVersion.Major, chartutil.DefaultKubeVersion.Minor)
+	"helm.sh/helm/v3/cmd/helm/require"
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/cli/values"
+	"helm.sh/helm/v3/pkg/releaseutil"
 )
 
 const templateDesc = `
 Render chart templates locally and display the output.
 
-This does not require Tiller. However, any values that would normally be
-looked up or retrieved in-cluster will be faked locally. Additionally, none
-of the server-side testing of chart validity (e.g. whether an API is supported)
-is done.
-
-To render just one template in a chart, use '-x':
-
-	$ helm template mychart -x templates/deployment.yaml
+Any values that would normally be looked up or retrieved in-cluster will be
+faked locally. Additionally, none of the server-side testing of chart validity
+(e.g. whether an API is supported) is done.
 `
 
-type templateCmd struct {
-	namespace    string
-	valueFiles   valueFiles
-	chartPath    string
-	out          io.Writer
-	values       []string
-	nameTemplate string
-	showNotes    bool
-	releaseName  string
-	renderFiles  []string
-	kubeVersion  string
-	outputDir    string
-}
-
-func newTemplateCmd(out io.Writer) *cobra.Command {
-
-	t := &templateCmd{
-		out: out,
-	}
+func newTemplateCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
+	var validate bool
+	var includeCrds bool
+	client := action.NewInstall(cfg)
+	valueOpts := &values.Options{}
+	var extraAPIs []string
+	var showFiles []string
 
 	cmd := &cobra.Command{
-		Use:   "template [flags] CHART",
-		Short: fmt.Sprintf("locally render templates"),
+		Use:   "template [NAME] [CHART]",
+		Short: "locally render templates",
 		Long:  templateDesc,
-		RunE:  t.run,
+		Args:  require.MinimumNArgs(1),
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			return compInstall(args, toComplete, client)
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			client.DryRun = true
+			client.ReleaseName = "RELEASE-NAME"
+			client.Replace = true // Skip the name check
+			client.ClientOnly = !validate
+			client.APIVersions = chartutil.VersionSet(extraAPIs)
+			client.IncludeCRDs = includeCrds
+			rel, err := runInstall(args, client, valueOpts, out)
+
+			if err != nil && !settings.Debug {
+				if rel != nil {
+					return fmt.Errorf("%w\n\nUse --debug flag to render out invalid YAML", err)
+				}
+				return err
+			}
+
+			// We ignore a potential error here because, when the --debug flag was specified,
+			// we always want to print the YAML, even if it is not valid. The error is still returned afterwards.
+			if rel != nil {
+				var manifests bytes.Buffer
+				fmt.Fprintln(&manifests, strings.TrimSpace(rel.Manifest))
+				if !client.DisableHooks {
+					fileWritten := make(map[string]bool)
+					for _, m := range rel.Hooks {
+						if client.OutputDir == "" {
+							fmt.Fprintf(&manifests, "---\n# Source: %s\n%s\n", m.Path, m.Manifest)
+						} else {
+							newDir := client.OutputDir
+							if client.UseReleaseName {
+								newDir = filepath.Join(client.OutputDir, client.ReleaseName)
+							}
+							err = writeToFile(newDir, m.Path, m.Manifest, fileWritten[m.Path])
+							if err != nil {
+								return err
+							}
+							fileWritten[m.Path] = true
+						}
+
+					}
+				}
+
+				// if we have a list of files to render, then check that each of the
+				// provided files exists in the chart.
+				if len(showFiles) > 0 {
+					// This is necessary to ensure consistent manifest ordering when using --show-only
+					// with globs or directory names.
+					splitManifests := releaseutil.SplitManifests(manifests.String())
+					manifestsKeys := make([]string, 0, len(splitManifests))
+					for k := range splitManifests {
+						manifestsKeys = append(manifestsKeys, k)
+					}
+					sort.Sort(releaseutil.BySplitManifestsOrder(manifestsKeys))
+
+					manifestNameRegex := regexp.MustCompile("# Source: [^/]+/(.+)")
+					var manifestsToRender []string
+					for _, f := range showFiles {
+						missing := true
+						// Use linux-style filepath separators to unify user's input path
+						f = filepath.ToSlash(f)
+						for _, manifestKey := range manifestsKeys {
+							manifest := splitManifests[manifestKey]
+							submatch := manifestNameRegex.FindStringSubmatch(manifest)
+							if len(submatch) == 0 {
+								continue
+							}
+							manifestName := submatch[1]
+							// manifest.Name is rendered using linux-style filepath separators on Windows as
+							// well as macOS/linux.
+							manifestPathSplit := strings.Split(manifestName, "/")
+							// manifest.Path is connected using linux-style filepath separators on Windows as
+							// well as macOS/linux
+							manifestPath := strings.Join(manifestPathSplit, "/")
+
+							// if the filepath provided matches a manifest path in the
+							// chart, render that manifest
+							if matched, _ := filepath.Match(f, manifestPath); !matched {
+								continue
+							}
+							manifestsToRender = append(manifestsToRender, manifest)
+							missing = false
+						}
+						if missing {
+							return fmt.Errorf("could not find template %s in chart", f)
+						}
+					}
+					for _, m := range manifestsToRender {
+						fmt.Fprintf(out, "---\n%s\n", m)
+					}
+				} else {
+					fmt.Fprintf(out, "%s", manifests.String())
+				}
+			}
+
+			return err
+		},
 	}
 
 	f := cmd.Flags()
-	f.BoolVar(&t.showNotes, "notes", false, "show the computed NOTES.txt file as well")
-	f.StringVarP(&t.releaseName, "name", "n", "RELEASE-NAME", "release name")
-	f.StringArrayVarP(&t.renderFiles, "execute", "x", []string{}, "only execute the given templates")
-	f.VarP(&t.valueFiles, "values", "f", "specify values in a YAML file (can specify multiple)")
-	f.StringVar(&t.namespace, "namespace", "", "namespace to install the release into")
-	f.StringArrayVar(&t.values, "set", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
-	f.StringVar(&t.nameTemplate, "name-template", "", "specify template used to name the release")
-	f.StringVar(&t.kubeVersion, "kube-version", defaultKubeVersion, "kubernetes version used as Capabilities.KubeVersion.Major/Minor")
-	f.StringVar(&t.outputDir, "output-dir", "", "writes the executed templates to files in output-dir instead of stdout")
+	addInstallFlags(cmd, f, client, valueOpts)
+	f.StringArrayVarP(&showFiles, "show-only", "s", []string{}, "only show manifests rendered from the given templates")
+	f.StringVar(&client.OutputDir, "output-dir", "", "writes the executed templates to files in output-dir instead of stdout")
+	f.BoolVar(&validate, "validate", false, "validate your manifests against the Kubernetes cluster you are currently pointing at. This is the same validation performed on an install")
+	f.BoolVar(&includeCrds, "include-crds", false, "include CRDs in the templated output")
+	f.BoolVar(&client.IsUpgrade, "is-upgrade", false, "set .Release.IsUpgrade instead of .Release.IsInstall")
+	f.StringArrayVarP(&extraAPIs, "api-versions", "a", []string{}, "Kubernetes api versions used for Capabilities.APIVersions")
+	f.BoolVar(&client.UseReleaseName, "release-name", false, "use release name in the output-dir path.")
+	bindPostRenderFlag(cmd, &client.PostRenderer)
 
 	return cmd
 }
 
-func (t *templateCmd) run(cmd *cobra.Command, args []string) error {
-	if len(args) < 1 {
-		return errors.New("chart is required")
-	}
-	// verify chart path exists
-	if _, err := os.Stat(args[0]); err == nil {
-		if t.chartPath, err = filepath.Abs(args[0]); err != nil {
-			return err
-		}
-	} else {
-		return err
-	}
-	// verify specified templates exist relative to chart
-	rf := []string{}
-	var af string
-	var err error
-	if len(t.renderFiles) > 0 {
-		for _, f := range t.renderFiles {
-			if !filepath.IsAbs(f) {
-				af, err = filepath.Abs(t.chartPath + "/" + f)
-				if err != nil {
-					return fmt.Errorf("could not resolve template path: %s", err)
-				}
-			} else {
-				af = f
-			}
-			rf = append(rf, af)
-
-			if _, err := os.Stat(af); err != nil {
-				return fmt.Errorf("could not resolve template path: %s", err)
-			}
-		}
-	}
-
-	// verify that output-dir exists if provided
-	if t.outputDir != "" {
-		_, err = os.Stat(t.outputDir)
-		if os.IsNotExist(err) {
-			return fmt.Errorf("output-dir '%s' does not exist", t.outputDir)
-		}
-	}
-
-	if t.namespace == "" {
-		t.namespace = defaultNamespace()
-	}
-	// get combined values and create config
-	rawVals, err := vals(t.valueFiles, t.values)
-	if err != nil {
-		return err
-	}
-	config := &chart.Config{Raw: string(rawVals), Values: map[string]*chart.Value{}}
-
-	// If template is specified, try to run the template.
-	if t.nameTemplate != "" {
-		t.releaseName, err = generateName(t.nameTemplate)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Check chart requirements to make sure all dependencies are present in /charts
-	c, err := chartutil.Load(t.chartPath)
-	if err != nil {
-		return prettyError(err)
-	}
-
-	if req, err := chartutil.LoadRequirements(c); err == nil {
-		if err := checkDependencies(c, req); err != nil {
-			return prettyError(err)
-		}
-	} else if err != chartutil.ErrRequirementsNotFound {
-		return fmt.Errorf("cannot load requirements: %v", err)
-	}
-	options := chartutil.ReleaseOptions{
-		Name:      t.releaseName,
-		Time:      timeconv.Now(),
-		Namespace: t.namespace,
-	}
-
-	err = chartutil.ProcessRequirementsEnabled(c, config)
-	if err != nil {
-		return err
-	}
-	err = chartutil.ProcessRequirementsImportValues(c)
-	if err != nil {
-		return err
-	}
-
-	// Set up engine.
-	renderer := engine.New()
-
-	caps := &chartutil.Capabilities{
-		APIVersions:   chartutil.DefaultVersionSet,
-		KubeVersion:   chartutil.DefaultKubeVersion,
-		TillerVersion: tversion.GetVersionProto(),
-	}
-
-	// kubernetes version
-	kv, err := semver.NewVersion(t.kubeVersion)
-	if err != nil {
-		return fmt.Errorf("could not parse a kubernetes version: %v", err)
-	}
-	caps.KubeVersion.Major = fmt.Sprint(kv.Major())
-	caps.KubeVersion.Minor = fmt.Sprint(kv.Minor())
-	caps.KubeVersion.GitVersion = fmt.Sprintf("v%d.%d.0", kv.Major(), kv.Minor())
-
-	vals, err := chartutil.ToRenderValuesCaps(c, config, options, caps)
-	if err != nil {
-		return err
-	}
-
-	out, err := renderer.Render(c, vals)
-	listManifests := []tiller.Manifest{}
-	if err != nil {
-		return err
-	}
-	// extract kind and name
-	re := regexp.MustCompile("kind:(.*)\n")
-	for k, v := range out {
-		match := re.FindStringSubmatch(v)
-		h := "Unknown"
-		if len(match) == 2 {
-			h = strings.TrimSpace(match[1])
-		}
-		m := tiller.Manifest{Name: k, Content: v, Head: &util.SimpleHead{Kind: h}}
-		listManifests = append(listManifests, m)
-	}
-	in := func(needle string, haystack []string) bool {
-		// make needle path absolute
-		d := strings.Split(needle, "/")
-		dd := d[1:]
-		an := t.chartPath + "/" + strings.Join(dd, "/")
-
-		for _, h := range haystack {
-			if h == an {
-				return true
-			}
-		}
-		return false
-	}
-	if settings.Debug {
-		rel := &release.Release{
-			Name:      t.releaseName,
-			Chart:     c,
-			Config:    config,
-			Version:   1,
-			Namespace: t.namespace,
-			Info:      &release.Info{LastDeployed: timeconv.Timestamp(time.Now())},
-		}
-		printRelease(os.Stdout, rel)
-	}
-
-	for _, m := range tiller.SortByKind(listManifests) {
-		if len(t.renderFiles) > 0 && !in(m.Name, rf) {
-			continue
-		}
-		data := m.Content
-		b := filepath.Base(m.Name)
-		if !t.showNotes && b == "NOTES.txt" {
-			continue
-		}
-		if strings.HasPrefix(b, "_") {
-			continue
-		}
-
-		if t.outputDir != "" {
-			// blank template after execution
-			if whitespaceRegex.MatchString(data) {
-				continue
-			}
-			err = writeToFile(t.outputDir, m.Name, data)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		fmt.Printf("---\n# Source: %s\n", m.Name)
-		fmt.Println(data)
-	}
-	return nil
-}
-
-// write the <data> to <output-dir>/<name>
-func writeToFile(outputDir string, name string, data string) error {
+// The following functions (writeToFile, createOrOpenFile, and ensureDirectoryForFile)
+// are coppied from the actions package. This is part of a change to correct a
+// bug introduced by #8156. As part of the todo to refactor renderResources
+// this duplicate code should be removed. It is added here so that the API
+// surface area is as minimally impacted as possible in fixing the issue.
+func writeToFile(outputDir string, name string, data string, append bool) error {
 	outfileName := strings.Join([]string{outputDir, name}, string(filepath.Separator))
 
 	err := ensureDirectoryForFile(outfileName)
@@ -294,14 +184,14 @@ func writeToFile(outputDir string, name string, data string) error {
 		return err
 	}
 
-	f, err := os.Create(outfileName)
+	f, err := createOrOpenFile(outfileName, append)
 	if err != nil {
 		return err
 	}
 
 	defer f.Close()
 
-	_, err = f.WriteString(fmt.Sprintf("##---\n# Source: %s\n%s", name, data))
+	_, err = f.WriteString(fmt.Sprintf("---\n# Source: %s\n%s\n", name, data))
 
 	if err != nil {
 		return err
@@ -311,7 +201,13 @@ func writeToFile(outputDir string, name string, data string) error {
 	return nil
 }
 
-// check if the directory exists to create file. creates if don't exists
+func createOrOpenFile(filename string, append bool) (*os.File, error) {
+	if append {
+		return os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0600)
+	}
+	return os.Create(filename)
+}
+
 func ensureDirectoryForFile(file string) error {
 	baseDir := path.Dir(file)
 	_, err := os.Stat(baseDir)
@@ -319,5 +215,5 @@ func ensureDirectoryForFile(file string) error {
 		return err
 	}
 
-	return os.MkdirAll(baseDir, defaultDirectoryPermission)
+	return os.MkdirAll(baseDir, 0755)
 }

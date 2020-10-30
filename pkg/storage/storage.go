@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,16 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package storage // import "k8s.io/helm/pkg/storage"
+package storage // import "helm.sh/helm/v3/pkg/storage"
 
 import (
 	"fmt"
 	"strings"
 
-	rspb "k8s.io/helm/pkg/proto/hapi/release"
-	relutil "k8s.io/helm/pkg/releaseutil"
-	"k8s.io/helm/pkg/storage/driver"
+	"github.com/pkg/errors"
+
+	rspb "helm.sh/helm/v3/pkg/release"
+	relutil "helm.sh/helm/v3/pkg/releaseutil"
+	"helm.sh/helm/v3/pkg/storage/driver"
 )
+
+// HelmStorageType is the type field of the Kubernetes storage object which stores the Helm release
+// version. It is modified slightly replacing the '/': sh.helm/release.v1
+// Note: The version 'v1' is incremented if the release object metadata is
+// modified between major releases.
+// This constant is used as a prefix for the Kubernetes storage object name.
+const HelmStorageType = "sh.helm.release.v1"
 
 // Storage represents a storage engine for a Release.
 type Storage struct {
@@ -40,7 +49,7 @@ type Storage struct {
 // Get retrieves the release from storage. An error is returned
 // if the storage driver failed to fetch the release, or the
 // release identified by the key, version pair does not exist.
-func (s *Storage) Get(name string, version int32) (*rspb.Release, error) {
+func (s *Storage) Get(name string, version int) (*rspb.Release, error) {
 	s.Log("getting release %q", makeKey(name, version))
 	return s.Driver.Get(makeKey(name, version))
 }
@@ -57,7 +66,7 @@ func (s *Storage) Create(rls *rspb.Release) error {
 	return s.Driver.Create(makeKey(rls.Name, rls.Version), rls)
 }
 
-// Update update the release in storage. An error is returned if the
+// Update updates the release in storage. An error is returned if the
 // storage backend fails to update the release or if the release
 // does not exist.
 func (s *Storage) Update(rls *rspb.Release) error {
@@ -68,7 +77,7 @@ func (s *Storage) Update(rls *rspb.Release) error {
 // Delete deletes the release from storage. An error is returned if
 // the storage backend fails to delete the release or if the release
 // does not exist.
-func (s *Storage) Delete(name string, version int32) (*rspb.Release, error) {
+func (s *Storage) Delete(name string, version int) (*rspb.Release, error) {
 	s.Log("deleting release %q", makeKey(name, version))
 	return s.Driver.Delete(makeKey(name, version))
 }
@@ -80,12 +89,12 @@ func (s *Storage) ListReleases() ([]*rspb.Release, error) {
 	return s.Driver.List(func(_ *rspb.Release) bool { return true })
 }
 
-// ListDeleted returns all releases with Status == DELETED. An error is returned
+// ListUninstalled returns all releases with Status == UNINSTALLED. An error is returned
 // if the storage backend fails to retrieve the releases.
-func (s *Storage) ListDeleted() ([]*rspb.Release, error) {
-	s.Log("listing deleted releases in storage")
+func (s *Storage) ListUninstalled() ([]*rspb.Release, error) {
+	s.Log("listing uninstalled releases in storage")
 	return s.Driver.List(func(rls *rspb.Release) bool {
-		return relutil.StatusFilter(rspb.Status_DELETED).Check(rls)
+		return relutil.StatusFilter(rspb.StatusUninstalled).Check(rls)
 	})
 }
 
@@ -94,27 +103,7 @@ func (s *Storage) ListDeleted() ([]*rspb.Release, error) {
 func (s *Storage) ListDeployed() ([]*rspb.Release, error) {
 	s.Log("listing all deployed releases in storage")
 	return s.Driver.List(func(rls *rspb.Release) bool {
-		return relutil.StatusFilter(rspb.Status_DEPLOYED).Check(rls)
-	})
-}
-
-// ListFilterAll returns the set of releases satisfying the predicate
-// (filter0 && filter1 && ... && filterN), i.e. a Release is included in the results
-// if and only if all filters return true.
-func (s *Storage) ListFilterAll(fns ...relutil.FilterFunc) ([]*rspb.Release, error) {
-	s.Log("listing all releases with filter")
-	return s.Driver.List(func(rls *rspb.Release) bool {
-		return relutil.All(fns...).Check(rls)
-	})
-}
-
-// ListFilterAny returns the set of releases satisfying the predicate
-// (filter0 || filter1 || ... || filterN), i.e. a Release is included in the results
-// if at least one of the filters returns true.
-func (s *Storage) ListFilterAny(fns ...relutil.FilterFunc) ([]*rspb.Release, error) {
-	s.Log("listing any releases with filter")
-	return s.Driver.List(func(rls *rspb.Release) bool {
-		return relutil.Any(fns...).Check(rls)
+		return relutil.StatusFilter(rspb.StatusDeployed).Check(rls)
 	})
 }
 
@@ -123,17 +112,18 @@ func (s *Storage) ListFilterAny(fns ...relutil.FilterFunc) ([]*rspb.Release, err
 func (s *Storage) Deployed(name string) (*rspb.Release, error) {
 	ls, err := s.DeployedAll(name)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return nil, fmt.Errorf("%q has no deployed releases", name)
-		}
 		return nil, err
 	}
 
 	if len(ls) == 0 {
-		return nil, fmt.Errorf("%q has no deployed releases", name)
+		return nil, driver.NewErrNoDeployedReleases(name)
 	}
 
-	return ls[0], err
+	// If executed concurrently, Helm's database gets corrupted
+	// and multiple releases are DEPLOYED. Take the latest.
+	relutil.Reverse(ls, relutil.SortByRevision)
+
+	return ls[0], nil
 }
 
 // DeployedAll returns all deployed releases with the provided name, or
@@ -142,15 +132,15 @@ func (s *Storage) DeployedAll(name string) ([]*rspb.Release, error) {
 	s.Log("getting deployed releases from %q history", name)
 
 	ls, err := s.Driver.Query(map[string]string{
-		"NAME":   name,
-		"OWNER":  "TILLER",
-		"STATUS": "DEPLOYED",
+		"name":   name,
+		"owner":  "helm",
+		"status": "deployed",
 	})
 	if err == nil {
 		return ls, nil
 	}
 	if strings.Contains(err.Error(), "not found") {
-		return nil, fmt.Errorf("%q has no deployed releases", name)
+		return nil, driver.NewErrNoDeployedReleases(name)
 	}
 	return nil, err
 }
@@ -160,7 +150,7 @@ func (s *Storage) DeployedAll(name string) ([]*rspb.Release, error) {
 func (s *Storage) History(name string) ([]*rspb.Release, error) {
 	s.Log("getting release history for %q", name)
 
-	return s.Driver.Query(map[string]string{"NAME": name, "OWNER": "TILLER"})
+	return s.Driver.Query(map[string]string{"name": name, "owner": "helm"})
 }
 
 // removeLeastRecent removes items from history until the lengh number of releases
@@ -179,33 +169,59 @@ func (s *Storage) removeLeastRecent(name string, max int) error {
 	if len(h) <= max {
 		return nil
 	}
-	overage := len(h) - max
 
 	// We want oldest to newest
 	relutil.SortByRevision(h)
 
-	// Delete as many as possible. In the case of API throughput limitations,
-	// multiple invocations of this function will eventually delete them all.
-	toDelete := h[0:overage]
-	errors := []error{}
-	for _, rel := range toDelete {
-		key := makeKey(name, rel.Version)
-		_, innerErr := s.Delete(name, rel.Version)
-		if innerErr != nil {
-			s.Log("error pruning %s from release history: %s", key, innerErr)
-			errors = append(errors, innerErr)
+	lastDeployed, err := s.Deployed(name)
+	if err != nil {
+		return err
+	}
+
+	var toDelete []*rspb.Release
+	for _, rel := range h {
+		// once we have enough releases to delete to reach the max, stop
+		if len(h)-len(toDelete) == max {
+			break
+		}
+		if lastDeployed != nil {
+			if rel.Version != lastDeployed.Version {
+				toDelete = append(toDelete, rel)
+			}
+		} else {
+			toDelete = append(toDelete, rel)
 		}
 	}
 
-	s.Log("Pruned %d record(s) from %s with %d error(s)", len(toDelete), name, len(errors))
-	switch c := len(errors); c {
+	// Delete as many as possible. In the case of API throughput limitations,
+	// multiple invocations of this function will eventually delete them all.
+	errs := []error{}
+	for _, rel := range toDelete {
+		err = s.deleteReleaseVersion(name, rel.Version)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	s.Log("Pruned %d record(s) from %s with %d error(s)", len(toDelete), name, len(errs))
+	switch c := len(errs); c {
 	case 0:
 		return nil
 	case 1:
-		return errors[0]
+		return errs[0]
 	default:
-		return fmt.Errorf("encountered %d deletion errors. First is: %s", c, errors[0])
+		return errors.Errorf("encountered %d deletion errors. First is: %s", c, errs[0])
 	}
+}
+
+func (s *Storage) deleteReleaseVersion(name string, version int) error {
+	key := makeKey(name, version)
+	_, err := s.Delete(name, version)
+	if err != nil {
+		s.Log("error pruning %s from release history: %s", key, err)
+		return err
+	}
+	return nil
 }
 
 // Last fetches the last revision of the named release.
@@ -216,18 +232,21 @@ func (s *Storage) Last(name string) (*rspb.Release, error) {
 		return nil, err
 	}
 	if len(h) == 0 {
-		return nil, fmt.Errorf("no revision for release %q", name)
+		return nil, errors.Errorf("no revision for release %q", name)
 	}
 
 	relutil.Reverse(h, relutil.SortByRevision)
 	return h[0], nil
 }
 
-// makeKey concatenates a release name and version into
-// a string with format ```<release_name>#v<version>```.
+// makeKey concatenates the Kubernetes storage object type, a release name and version
+// into a string with format:```<helm_storage_type>.<release_name>.v<release_version>```.
+// The storage type is prepended to keep name uniqueness between different
+// release storage types. An example of clash when not using the type:
+// https://github.com/helm/helm/issues/6435.
 // This key is used to uniquely identify storage objects.
-func makeKey(rlsname string, version int32) string {
-	return fmt.Sprintf("%s.v%d", rlsname, version)
+func makeKey(rlsname string, version int) string {
+	return fmt.Sprintf("%s.%s.v%d", HelmStorageType, rlsname, version)
 }
 
 // Init initializes a new storage backend with the driver d.

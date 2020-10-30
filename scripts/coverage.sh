@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2016 The Kubernetes Authors All rights reserved.
+# Copyright The Helm Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,11 +20,12 @@ covermode=${COVERMODE:-atomic}
 coverdir=$(mktemp -d /tmp/coverage.XXXXXXXXXX)
 profile="${coverdir}/cover.out"
 
+pushd /
 hash goveralls 2>/dev/null || go get github.com/mattn/goveralls
-hash godir 2>/dev/null || go get github.com/Masterminds/godir
+popd
 
 generate_cover_data() {
-  for d in $(godir) ; do
+  for d in $(go list ./...) ; do
     (
       local output="${coverdir}/${d//\//-}.cover"
       go test -coverprofile="${output}" -covermode="$covermode" "$d"

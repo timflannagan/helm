@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,21 +19,17 @@ package main
 import (
 	"bytes"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"k8s.io/helm/pkg/repo"
+	"helm.sh/helm/v3/internal/test/ensure"
+	"helm.sh/helm/v3/pkg/repo"
 )
 
 func TestRepoIndexCmd(t *testing.T) {
 
-	dir, err := ioutil.TempDir("", "helm-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := ensure.TempDir(t)
 
 	comp := filepath.Join(dir, "compressedchart-0.1.0.tgz")
 	if err := linkOrCopy("testdata/testcharts/compressedchart-0.1.0.tgz", comp); err != nil {
@@ -106,6 +102,36 @@ func TestRepoIndexCmd(t *testing.T) {
 	vs = index.Entries["compressedchart"]
 	if len(vs) != 3 {
 		t.Errorf("expected 3 versions, got %d: %#v", len(vs), vs)
+	}
+
+	expectedVersion = "0.3.0"
+	if vs[0].Version != expectedVersion {
+		t.Errorf("expected %q, got %q", expectedVersion, vs[0].Version)
+	}
+
+	// test that index.yaml gets generated on merge even when it doesn't exist
+	if err := os.Remove(destIndex); err != nil {
+		t.Fatal(err)
+	}
+
+	c.ParseFlags([]string{"--merge", destIndex})
+	if err := c.RunE(c, []string{dir}); err != nil {
+		t.Error(err)
+	}
+
+	index, err = repo.LoadIndexFile(destIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// verify it didn't create an empty index.yaml and the merged happened
+	if len(index.Entries) != 2 {
+		t.Errorf("expected 2 entries, got %d: %#v", len(index.Entries), index.Entries)
+	}
+
+	vs = index.Entries["compressedchart"]
+	if len(vs) != 1 {
+		t.Errorf("expected 1 versions, got %d: %#v", len(vs), vs)
 	}
 
 	expectedVersion = "0.3.0"

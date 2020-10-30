@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,34 +16,17 @@ limitations under the License.
 package getter
 
 import (
-	"os"
-	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
-	"k8s.io/helm/pkg/helm/environment"
-	"k8s.io/helm/pkg/helm/helmpath"
+	"helm.sh/helm/v3/pkg/cli"
 )
 
-func hh(debug bool) environment.EnvSettings {
-	apath, err := filepath.Abs("./testdata")
-	if err != nil {
-		panic(err)
-	}
-	hp := helmpath.Home(apath)
-	return environment.EnvSettings{
-		Home:  hp,
-		Debug: debug,
-	}
-}
-
 func TestCollectPlugins(t *testing.T) {
-	// Reset HELM HOME to testdata.
-	oldhh := os.Getenv("HELM_HOME")
-	defer os.Setenv("HELM_HOME", oldhh)
-	os.Setenv("HELM_HOME", "")
+	env := cli.New()
+	env.PluginsDirectory = pluginDir
 
-	env := hh(false)
 	p, err := collectPlugins(env)
 	if err != nil {
 		t.Fatal(err)
@@ -67,13 +50,14 @@ func TestCollectPlugins(t *testing.T) {
 }
 
 func TestPluginGetter(t *testing.T) {
-	oldhh := os.Getenv("HELM_HOME")
-	defer os.Setenv("HELM_HOME", oldhh)
-	os.Setenv("HELM_HOME", "")
+	if runtime.GOOS == "windows" {
+		t.Skip("TODO: refactor this test to work on windows")
+	}
 
-	env := hh(false)
-	pg := newPluginGetter("echo", env, "test", ".")
-	g, err := pg("test://foo/bar", "", "", "")
+	env := cli.New()
+	env.PluginsDirectory = pluginDir
+	pg := NewPluginGetter("echo", env, "test", ".")
+	g, err := pg()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +69,32 @@ func TestPluginGetter(t *testing.T) {
 
 	expect := "test://foo/bar"
 	got := strings.TrimSpace(data.String())
+	if got != expect {
+		t.Errorf("Expected %q, got %q", expect, got)
+	}
+}
+
+func TestPluginSubCommands(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TODO: refactor this test to work on windows")
+	}
+
+	env := cli.New()
+	env.PluginsDirectory = pluginDir
+
+	pg := NewPluginGetter("echo -n", env, "test", ".")
+	g, err := pg()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := g.Get("test://foo/bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expect := "   test://foo/bar"
+	got := data.String()
 	if got != expect {
 		t.Errorf("Expected %q, got %q", expect, got)
 	}

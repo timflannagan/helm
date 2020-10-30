@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,17 +22,20 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/helm/pkg/lint/support"
+	"helm.sh/helm/v3/internal/test/ensure"
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/lint/support"
 )
 
 const templateTestBasedir = "./testdata/albatross"
 
 func TestValidateAllowedExtension(t *testing.T) {
-	var failTest = []string{"/foo", "/test.yml", "/test.toml", "test.yml"}
+	var failTest = []string{"/foo", "/test.toml"}
 	for _, test := range failTest {
 		err := validateAllowedExtension(test)
-		if err == nil || !strings.Contains(err.Error(), "Valid extensions are .yaml, .tpl, or .txt") {
-			t.Errorf("validateAllowedExtension('%s') to return \"Valid extensions are .yaml, .tpl, or .txt\", got no error", test)
+		if err == nil || !strings.Contains(err.Error(), "Valid extensions are .yaml, .yml, .tpl, or .txt") {
+			t.Errorf("validateAllowedExtension('%s') to return \"Valid extensions are .yaml, .yml, .tpl, or .txt\", got no error", test)
 		}
 	}
 	var successTest = []string{"/foo.yaml", "foo.yaml", "foo.tpl", "/foo/bar/baz.yaml", "NOTES.txt"}
@@ -44,7 +47,7 @@ func TestValidateAllowedExtension(t *testing.T) {
 	}
 }
 
-var values = []byte("nameOverride: ''\nhttpPort: 80")
+var values = map[string]interface{}{"nameOverride": "", "httpPort": 80}
 
 const namespace = "testNamespace"
 const strict = false
@@ -79,5 +82,226 @@ func TestTemplateIntegrationHappyPath(t *testing.T) {
 
 	if len(res) != 0 {
 		t.Fatalf("Expected no error, got %d, %v", len(res), res)
+	}
+}
+
+func TestV3Fail(t *testing.T) {
+	linter := support.Linter{ChartDir: "./testdata/v3-fail"}
+	Templates(&linter, values, namespace, strict)
+	res := linter.Messages
+
+	if len(res) != 3 {
+		t.Fatalf("Expected 3 errors, got %d, %v", len(res), res)
+	}
+
+	if !strings.Contains(res[0].Err.Error(), ".Release.Time has been removed in v3") {
+		t.Errorf("Unexpected error: %s", res[0].Err)
+	}
+	if !strings.Contains(res[1].Err.Error(), "manifest is a crd-install hook") {
+		t.Errorf("Unexpected error: %s", res[1].Err)
+	}
+	if !strings.Contains(res[2].Err.Error(), "manifest is a crd-install hook") {
+		t.Errorf("Unexpected error: %s", res[2].Err)
+	}
+}
+
+func TestValidateMetadataName(t *testing.T) {
+	names := map[string]bool{
+		"":                          false,
+		"foo":                       true,
+		"foo.bar1234baz.seventyone": true,
+		"FOO":                       false,
+		"123baz":                    true,
+		"foo.BAR.baz":               false,
+		"one-two":                   true,
+		"-two":                      false,
+		"one_two":                   false,
+		"a..b":                      false,
+		"%^&#$%*@^*@&#^":            false,
+	}
+	for input, expectPass := range names {
+		obj := K8sYamlStruct{Metadata: k8sYamlMetadata{Name: input}}
+		if err := validateMetadataName(&obj); (err == nil) != expectPass {
+			st := "fail"
+			if expectPass {
+				st = "succeed"
+			}
+			t.Errorf("Expected %q to %s", input, st)
+			if err != nil {
+				t.Log(err)
+			}
+		}
+	}
+}
+
+func TestDeprecatedAPIFails(t *testing.T) {
+	mychart := chart.Chart{
+		Metadata: &chart.Metadata{
+			APIVersion: "v2",
+			Name:       "failapi",
+			Version:    "0.1.0",
+			Icon:       "satisfy-the-linting-gods.gif",
+		},
+		Templates: []*chart.File{
+			{
+				Name: "templates/baddeployment.yaml",
+				Data: []byte("apiVersion: apps/v1beta1\nkind: Deployment\nmetadata:\n  name: baddep\nspec: {selector: {matchLabels: {foo: bar}}}"),
+			},
+			{
+				Name: "templates/goodsecret.yaml",
+				Data: []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: goodsecret"),
+			},
+		},
+	}
+	tmpdir := ensure.TempDir(t)
+	defer os.RemoveAll(tmpdir)
+
+	if err := chartutil.SaveDir(&mychart, tmpdir); err != nil {
+		t.Fatal(err)
+	}
+
+	linter := support.Linter{ChartDir: filepath.Join(tmpdir, mychart.Name())}
+	Templates(&linter, values, namespace, strict)
+	if l := len(linter.Messages); l != 1 {
+		for i, msg := range linter.Messages {
+			t.Logf("Message %d: %s", i, msg)
+		}
+		t.Fatalf("Expected 1 lint error, got %d", l)
+	}
+
+	err := linter.Messages[0].Err.(deprecatedAPIError)
+	if err.Deprecated != "apps/v1beta1 Deployment" {
+		t.Errorf("Surprised to learn that %q is deprecated", err.Deprecated)
+	}
+}
+
+const manifest = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo
+data:
+  myval1: {{default "val" .Values.mymap.key1 }}
+  myval2: {{default "val" .Values.mymap.key2 }}
+`
+
+// TestSTrictTemplatePrasingMapError is a regression test.
+//
+// The template engine should not produce an error when a map in values.yaml does
+// not contain all possible keys.
+//
+// See https://github.com/helm/helm/issues/7483
+func TestStrictTemplateParsingMapError(t *testing.T) {
+
+	ch := chart.Chart{
+		Metadata: &chart.Metadata{
+			Name:       "regression7483",
+			APIVersion: "v2",
+			Version:    "0.1.0",
+		},
+		Values: map[string]interface{}{
+			"mymap": map[string]string{
+				"key1": "val1",
+			},
+		},
+		Templates: []*chart.File{
+			{
+				Name: "templates/configmap.yaml",
+				Data: []byte(manifest),
+			},
+		},
+	}
+	dir := ensure.TempDir(t)
+	defer os.RemoveAll(dir)
+	if err := chartutil.SaveDir(&ch, dir); err != nil {
+		t.Fatal(err)
+	}
+	linter := &support.Linter{
+		ChartDir: filepath.Join(dir, ch.Metadata.Name),
+	}
+	Templates(linter, ch.Values, namespace, strict)
+	if len(linter.Messages) != 0 {
+		t.Errorf("expected zero messages, got %d", len(linter.Messages))
+		for i, msg := range linter.Messages {
+			t.Logf("Message %d: %q", i, msg)
+		}
+	}
+}
+
+func TestValidateMatchSelector(t *testing.T) {
+	md := &K8sYamlStruct{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Metadata: k8sYamlMetadata{
+			Name: "mydeployment",
+		},
+	}
+	manifest := `
+	apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+	`
+	if err := validateMatchSelector(md, manifest); err != nil {
+		t.Error(err)
+	}
+	manifest = `
+	apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchExpressions:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+	`
+	if err := validateMatchSelector(md, manifest); err != nil {
+		t.Error(err)
+	}
+	manifest = `
+	apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+	`
+	if err := validateMatchSelector(md, manifest); err == nil {
+		t.Error("expected Deployment with no selector to fail")
 	}
 }

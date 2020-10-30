@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,72 +16,102 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"helm.sh/helm/v3/cmd/helm/require"
 )
 
 const completionDesc = `
-Generate autocompletions script for Helm for the specified shell (bash or zsh).
+Generate autocompletions script for Helm for the specified shell.
+`
+const bashCompDesc = `
+Generate the autocompletion script for Helm for the bash shell.
 
-This command can generate shell autocompletions. e.g.
+To load completions in your current shell session:
+$ source <(helm completion bash)
 
-	$ helm completion bash
-
-Can be sourced as such
-
-	$ source <(helm completion bash)
+To load completions for every new session, execute once:
+Linux:
+  $ helm completion bash > /etc/bash_completion.d/helm
+MacOS:
+  $ helm completion bash > /usr/local/etc/bash_completion.d/helm
 `
 
-var (
-	completionShells = map[string]func(out io.Writer, cmd *cobra.Command) error{
-		"bash": runCompletionBash,
-		"zsh":  runCompletionZsh,
-	}
-)
+const zshCompDesc = `
+Generate the autocompletion script for Helm for the zsh shell.
+
+To load completions in your current shell session:
+$ source <(helm completion zsh)
+
+To load completions for every new session, execute once:
+$ helm completion zsh > "${fpath[1]}/_helm"
+`
 
 func newCompletionCmd(out io.Writer) *cobra.Command {
-	shells := []string{}
-	for s := range completionShells {
-		shells = append(shells, s)
+	cmd := &cobra.Command{
+		Use:   "completion",
+		Short: "generate autocompletions script for the specified shell",
+		Long:  completionDesc,
+		Args:  require.NoArgs,
 	}
 
-	cmd := &cobra.Command{
-		Use:   "completion SHELL",
-		Short: "Generate autocompletions script for the specified shell (bash or zsh)",
-		Long:  completionDesc,
+	bash := &cobra.Command{
+		Use:                   "bash",
+		Short:                 "generate autocompletions script for bash",
+		Long:                  bashCompDesc,
+		Args:                  require.NoArgs,
+		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCompletion(out, cmd, args)
+			return runCompletionBash(out, cmd)
 		},
-		ValidArgs: shells,
 	}
+
+	zsh := &cobra.Command{
+		Use:                   "zsh",
+		Short:                 "generate autocompletions script for zsh",
+		Long:                  zshCompDesc,
+		Args:                  require.NoArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCompletionZsh(out, cmd)
+		},
+	}
+
+	cmd.AddCommand(bash, zsh)
 
 	return cmd
 }
 
-func runCompletion(out io.Writer, cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("shell not specified")
-	}
-	if len(args) > 1 {
-		return fmt.Errorf("too many arguments, expected only the shell type")
-	}
-	run, found := completionShells[args[0]]
-	if !found {
-		return fmt.Errorf("unsupported shell type %q", args[0])
-	}
-
-	return run(out, cmd)
-}
-
 func runCompletionBash(out io.Writer, cmd *cobra.Command) error {
-	return cmd.Root().GenBashCompletion(out)
+	err := cmd.Root().GenBashCompletion(out)
+
+	// In case the user renamed the helm binary (e.g., to be able to run
+	// both helm2 and helm3), we hook the new binary name to the completion function
+	if binary := filepath.Base(os.Args[0]); binary != "helm" {
+		renamedBinaryHook := `
+# Hook the command used to generate the completion script
+# to the helm completion function to handle the case where
+# the user renamed the helm binary
+if [[ $(type -t compopt) = "builtin" ]]; then
+    complete -o default -F __start_helm %[1]s
+else
+    complete -o default -o nospace -F __start_helm %[1]s
+fi
+`
+		fmt.Fprintf(out, renamedBinaryHook, binary)
+	}
+
+	return err
 }
 
 func runCompletionZsh(out io.Writer, cmd *cobra.Command) error {
-	zshInitialization := `
+	zshInitialization := `#compdef helm
+
 __helm_bash_source() {
 	alias shopt=':'
 	alias _expand=_bash_expand
@@ -118,19 +148,15 @@ __helm_compgen() {
 	fi
 	for w in "${completions[@]}"; do
 		if [[ "${w}" = "$1"* ]]; then
-			echo "${w}"
+			# Use printf instead of echo because it is possible that
+			# the value to print is -n, which would be interpreted
+			# as a flag to echo
+			printf "%s\n" "${w}"
 		fi
 	done
 }
 __helm_compopt() {
 	true # don't do anything. Not supported by bashcompinit in zsh
-}
-__helm_declare() {
-	if [ "$1" == "-F" ]; then
-		whence -w "$@"
-	else
-		builtin declare "$@"
-	fi
 }
 __helm_ltrim_colon_completions()
 {
@@ -193,7 +219,7 @@ autoload -U +X bashcompinit && bashcompinit
 # use word boundary patterns for BSD or GNU sed
 LWORD='[[:<:]]'
 RWORD='[[:>:]]'
-if sed --help 2>&1 | grep -q GNU; then
+if sed --help 2>&1 | grep -q 'GNU\|BusyBox'; then
 	LWORD='\<'
 	RWORD='\>'
 fi
@@ -209,15 +235,15 @@ __helm_convert_bash_to_zsh() {
 	-e "s/${LWORD}__ltrim_colon_completions${RWORD}/__helm_ltrim_colon_completions/g" \
 	-e "s/${LWORD}compgen${RWORD}/__helm_compgen/g" \
 	-e "s/${LWORD}compopt${RWORD}/__helm_compopt/g" \
-	-e "s/${LWORD}declare${RWORD}/__helm_declare/g" \
+	-e "s/${LWORD}declare${RWORD}/builtin declare/g" \
 	-e "s/\\\$(type${RWORD}/\$(__helm_type/g" \
+	-e 's/aliashash\["\(.\{1,\}\)"\]/aliashash[\1]/g' \
+	-e 's/FUNCNAME/funcstack/g' \
 	<<'BASH_COMPLETION_EOF'
 `
 	out.Write([]byte(zshInitialization))
 
-	buf := new(bytes.Buffer)
-	cmd.Root().GenBashCompletion(buf)
-	out.Write(buf.Bytes())
+	runCompletionBash(out, cmd)
 
 	zshTail := `
 BASH_COMPLETION_EOF
