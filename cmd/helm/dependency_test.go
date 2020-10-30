@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,59 +16,38 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
-	"strings"
+	"runtime"
 	"testing"
 )
 
 func TestDependencyListCmd(t *testing.T) {
-
-	tests := []struct {
-		name   string
-		args   []string
-		expect string
-		err    bool
-	}{
-		{
-			name: "No such chart",
-			args: []string{"/no/such/chart"},
-			err:  true,
-		},
-		{
-			name:   "No requirements.yaml",
-			args:   []string{"testdata/testcharts/alpine"},
-			expect: "WARNING: no requirements at ",
-		},
-		{
-			name: "Requirements in chart dir",
-			args: []string{"testdata/testcharts/reqtest"},
-			expect: "NAME        \tVERSION\tREPOSITORY                \tSTATUS  \n" +
-				"reqsubchart \t0.1.0  \thttps://example.com/charts\tunpacked\n" +
-				"reqsubchart2\t0.2.0  \thttps://example.com/charts\tunpacked\n" +
-				"reqsubchart3\t>=0.1.0\thttps://example.com/charts\tok      \n\n",
-		},
-		{
-			name:   "Requirements in chart archive",
-			args:   []string{"testdata/testcharts/reqtest-0.1.0.tgz"},
-			expect: "NAME        \tVERSION\tREPOSITORY                \tSTATUS \nreqsubchart \t0.1.0  \thttps://example.com/charts\tmissing\nreqsubchart2\t0.2.0  \thttps://example.com/charts\tmissing\n",
-		},
+	noSuchChart := cmdTestCase{
+		name:      "No such chart",
+		cmd:       "dependency list /no/such/chart",
+		golden:    "output/dependency-list-no-chart-linux.txt",
+		wantError: true,
 	}
 
-	for _, tt := range tests {
-		buf := bytes.NewBuffer(nil)
-		dlc := newDependencyListCmd(buf)
-		if err := dlc.RunE(dlc, tt.args); err != nil {
-			if tt.err {
-				continue
-			}
-			t.Errorf("Test %q: %s", tt.name, err)
-			continue
-		}
-
-		got := buf.String()
-		if !strings.Contains(got, tt.expect) {
-			t.Errorf("Test: %q, Expected:\n%q\nGot:\n%q", tt.name, tt.expect, got)
-		}
+	noDependencies := cmdTestCase{
+		name:   "No dependencies",
+		cmd:    "dependency list testdata/testcharts/alpine",
+		golden: "output/dependency-list-no-requirements-linux.txt",
 	}
 
+	if runtime.GOOS == "windows" {
+		noSuchChart.golden = "output/dependency-list-no-chart-windows.txt"
+		noDependencies.golden = "output/dependency-list-no-requirements-windows.txt"
+	}
+
+	tests := []cmdTestCase{noSuchChart,
+		noDependencies, {
+			name:   "Dependencies in chart dir",
+			cmd:    "dependency list testdata/testcharts/reqtest",
+			golden: "output/dependency-list.txt",
+		}, {
+			name:   "Dependencies in chart archive",
+			cmd:    "dependency list testdata/testcharts/reqtest-0.1.0.tgz",
+			golden: "output/dependency-list-archive.txt",
+		}}
+	runTestCmd(t, tests)
 }

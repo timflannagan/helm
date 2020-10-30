@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,39 +17,70 @@ limitations under the License.
 package rules
 
 import (
-	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	"k8s.io/helm/pkg/chartutil"
-	"k8s.io/helm/pkg/lint/support"
+	"github.com/pkg/errors"
+
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/lint/support"
 )
 
 // Values lints a chart's values.yaml file.
+//
+// This function is deprecated and will be removed in Helm 4.
 func Values(linter *support.Linter) {
+	ValuesWithOverrides(linter, map[string]interface{}{})
+}
+
+// ValuesWithOverrides tests the values.yaml file.
+//
+// If a schema is present in the chart, values are tested against that. Otherwise,
+// they are only tested for well-formedness.
+//
+// If additional values are supplied, they are coalesced into the values in values.yaml.
+func ValuesWithOverrides(linter *support.Linter, values map[string]interface{}) {
 	file := "values.yaml"
 	vf := filepath.Join(linter.ChartDir, file)
-	fileExists := linter.RunLinterRule(support.InfoSev, file, validateValuesFileExistence(linter, vf))
+	fileExists := linter.RunLinterRule(support.InfoSev, file, validateValuesFileExistence(vf))
 
 	if !fileExists {
 		return
 	}
 
-	linter.RunLinterRule(support.ErrorSev, file, validateValuesFile(linter, vf))
+	linter.RunLinterRule(support.ErrorSev, file, validateValuesFile(vf, values))
 }
 
-func validateValuesFileExistence(linter *support.Linter, valuesPath string) error {
+func validateValuesFileExistence(valuesPath string) error {
 	_, err := os.Stat(valuesPath)
 	if err != nil {
-		return fmt.Errorf("file does not exist")
+		return errors.Errorf("file does not exist")
 	}
 	return nil
 }
 
-func validateValuesFile(linter *support.Linter, valuesPath string) error {
-	_, err := chartutil.ReadValuesFile(valuesPath)
+func validateValuesFile(valuesPath string, overrides map[string]interface{}) error {
+	values, err := chartutil.ReadValuesFile(valuesPath)
 	if err != nil {
-		return fmt.Errorf("unable to parse YAML\n\t%s", err)
+		return errors.Wrap(err, "unable to parse YAML")
 	}
-	return nil
+
+	// Helm 3.0.0 carried over the values linting from Helm 2.x, which only tests the top
+	// level values against the top-level expectations. Subchart values are not linted.
+	// We could change that. For now, though, we retain that strategy, and thus can
+	// coalesce tables (like reuse-values does) instead of doing the full chart
+	// CoalesceValues.
+	values = chartutil.CoalesceTables(values, overrides)
+
+	ext := filepath.Ext(valuesPath)
+	schemaPath := valuesPath[:len(valuesPath)-len(ext)] + ".schema.json"
+	schema, err := ioutil.ReadFile(schemaPath)
+	if len(schema) == 0 {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return chartutil.ValidateAgainstSingleSchema(values, schema)
 }

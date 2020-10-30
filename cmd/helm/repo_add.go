@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,83 +17,129 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/gofrs/flock"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"sigs.k8s.io/yaml"
 
-	"k8s.io/helm/pkg/getter"
-	"k8s.io/helm/pkg/helm/helmpath"
-	"k8s.io/helm/pkg/repo"
+	"helm.sh/helm/v3/cmd/helm/require"
+	"helm.sh/helm/v3/pkg/getter"
+	"helm.sh/helm/v3/pkg/repo"
 )
 
-type repoAddCmd struct {
-	name     string
-	url      string
-	home     helmpath.Home
-	noupdate bool
+type repoAddOptions struct {
+	name        string
+	url         string
+	username    string
+	password    string
+	forceUpdate bool
 
-	certFile string
-	keyFile  string
-	caFile   string
+	certFile              string
+	keyFile               string
+	caFile                string
+	insecureSkipTLSverify bool
 
-	out io.Writer
+	repoFile  string
+	repoCache string
+
+	// Deprecated, but cannot be removed until Helm 4
+	deprecatedNoUpdate bool
 }
 
 func newRepoAddCmd(out io.Writer) *cobra.Command {
-	add := &repoAddCmd{out: out}
+	o := &repoAddOptions{}
 
 	cmd := &cobra.Command{
-		Use:   "add [flags] [NAME] [URL]",
+		Use:   "add [NAME] [URL]",
 		Short: "add a chart repository",
+		Args:  require.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkArgsLength(len(args), "name for the chart repository", "the url of the chart repository"); err != nil {
-				return err
-			}
+			o.name = args[0]
+			o.url = args[1]
+			o.repoFile = settings.RepositoryConfig
+			o.repoCache = settings.RepositoryCache
 
-			add.name = args[0]
-			add.url = args[1]
-			add.home = settings.Home
-
-			return add.run()
+			return o.run(out)
 		},
 	}
 
 	f := cmd.Flags()
-	f.BoolVar(&add.noupdate, "no-update", false, "raise error if repo is already registered")
-	f.StringVar(&add.certFile, "cert-file", "", "identify HTTPS client using this SSL certificate file")
-	f.StringVar(&add.keyFile, "key-file", "", "identify HTTPS client using this SSL key file")
-	f.StringVar(&add.caFile, "ca-file", "", "verify certificates of HTTPS-enabled servers using this CA bundle")
+	f.StringVar(&o.username, "username", "", "chart repository username")
+	f.StringVar(&o.password, "password", "", "chart repository password")
+	f.BoolVar(&o.forceUpdate, "force-update", false, "replace (overwrite) the repo if it already exists")
+	f.BoolVar(&o.deprecatedNoUpdate, "no-update", false, "Ignored. Formerly, it would disabled forced updates. It is deprecated by force-update.")
+	f.StringVar(&o.certFile, "cert-file", "", "identify HTTPS client using this SSL certificate file")
+	f.StringVar(&o.keyFile, "key-file", "", "identify HTTPS client using this SSL key file")
+	f.StringVar(&o.caFile, "ca-file", "", "verify certificates of HTTPS-enabled servers using this CA bundle")
+	f.BoolVar(&o.insecureSkipTLSverify, "insecure-skip-tls-verify", false, "skip tls certificate checks for the repository")
 
 	return cmd
 }
 
-func (a *repoAddCmd) run() error {
-	if err := addRepository(a.name, a.url, a.home, a.certFile, a.keyFile, a.caFile, a.noupdate); err != nil {
+func (o *repoAddOptions) run(out io.Writer) error {
+	//Ensure the file directory exists as it is required for file locking
+	err := os.MkdirAll(filepath.Dir(o.repoFile), os.ModePerm)
+	if err != nil && !os.IsExist(err) {
 		return err
 	}
-	fmt.Fprintf(a.out, "%q has been added to your repositories\n", a.name)
-	return nil
-}
 
-func addRepository(name, url string, home helmpath.Home, certFile, keyFile, caFile string, noUpdate bool) error {
-	f, err := repo.LoadRepositoriesFile(home.RepositoryFile())
+	// Acquire a file lock for process synchronization
+	fileLock := flock.New(strings.Replace(o.repoFile, filepath.Ext(o.repoFile), ".lock", 1))
+	lockCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	locked, err := fileLock.TryLockContext(lockCtx, time.Second)
+	if err == nil && locked {
+		defer fileLock.Unlock()
+	}
 	if err != nil {
 		return err
 	}
 
-	if noUpdate && f.Has(name) {
-		return fmt.Errorf("repository name (%s) already exists, please specify a different name", name)
+	b, err := ioutil.ReadFile(o.repoFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 
-	cif := home.CacheIndex(name)
+	var f repo.File
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		return err
+	}
+
 	c := repo.Entry{
-		Name:     name,
-		Cache:    cif,
-		URL:      url,
-		CertFile: certFile,
-		KeyFile:  keyFile,
-		CAFile:   caFile,
+		Name:                  o.name,
+		URL:                   o.url,
+		Username:              o.username,
+		Password:              o.password,
+		CertFile:              o.certFile,
+		KeyFile:               o.keyFile,
+		CAFile:                o.caFile,
+		InsecureSkipTLSverify: o.insecureSkipTLSverify,
+	}
+
+	// If the repo exists do one of two things:
+	// 1. If the configuration for the name is the same continue without error
+	// 2. When the config is different require --force-update
+	if !o.forceUpdate && f.Has(o.name) {
+		existing := f.Get(o.name)
+		if c != *existing {
+
+			// The input coming in for the name is different from what is already
+			// configured. Return an error.
+			return errors.Errorf("repository name (%s) already exists, please specify a different name", o.name)
+		}
+
+		// The add is idempotent so do nothing
+		fmt.Fprintf(out, "%q already exists with the same configuration, skipping\n", o.name)
+		return nil
 	}
 
 	r, err := repo.NewChartRepository(&c, getter.All(settings))
@@ -101,11 +147,18 @@ func addRepository(name, url string, home helmpath.Home, certFile, keyFile, caFi
 		return err
 	}
 
-	if err := r.DownloadIndexFile(home.Cache()); err != nil {
-		return fmt.Errorf("Looks like %q is not a valid chart repository or cannot be reached: %s", url, err.Error())
+	if o.repoCache != "" {
+		r.CachePath = o.repoCache
+	}
+	if _, err := r.DownloadIndexFile(); err != nil {
+		return errors.Wrapf(err, "looks like %q is not a valid chart repository or cannot be reached", o.url)
 	}
 
 	f.Update(&c)
 
-	return f.WriteFile(home.RepositoryFile(), 0644)
+	if err := f.WriteFile(o.repoFile, 0644); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%q has been added to your repositories\n", o.name)
+	return nil
 }

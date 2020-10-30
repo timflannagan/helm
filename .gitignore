@@ -1,11 +1,10 @@
+*.exe
 .DS_Store
 .coverage/
+.idea/
 .vimrc
 .vscode/
 _dist/
-_proto/*.pb.go
 bin/
-rootfs/tiller
-rootfs/rudder
-*.exe
-.idea/
+# Ignores charts pulled for dependency build tests
+cmd/helm/testdata/testcharts/issue-7233/charts/*

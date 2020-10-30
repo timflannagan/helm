@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,35 +18,89 @@ package chartutil
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
-	"k8s.io/helm/pkg/proto/hapi/chart"
+	"github.com/pkg/errors"
+	"sigs.k8s.io/yaml"
+
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/chart/loader"
 )
+
+// chartName is a regular expression for testing the supplied name of a chart.
+// This regular expression is probably stricter than it needs to be. We can relax it
+// somewhat. Newline characters, as well as $, quotes, +, parens, and % are known to be
+// problematic.
+var chartName = regexp.MustCompile("^[a-zA-Z0-9._-]+$")
 
 const (
 	// ChartfileName is the default Chart file name.
 	ChartfileName = "Chart.yaml"
 	// ValuesfileName is the default values file name.
 	ValuesfileName = "values.yaml"
+	// SchemafileName is the default values schema file name.
+	SchemafileName = "values.schema.json"
 	// TemplatesDir is the relative directory name for templates.
 	TemplatesDir = "templates"
 	// ChartsDir is the relative directory name for charts dependencies.
 	ChartsDir = "charts"
+	// TemplatesTestsDir is the relative directory name for tests.
+	TemplatesTestsDir = TemplatesDir + sep + "tests"
 	// IgnorefileName is the name of the Helm ignore file.
 	IgnorefileName = ".helmignore"
 	// IngressFileName is the name of the example ingress file.
-	IngressFileName = "ingress.yaml"
+	IngressFileName = TemplatesDir + sep + "ingress.yaml"
 	// DeploymentName is the name of the example deployment file.
-	DeploymentName = "deployment.yaml"
+	DeploymentName = TemplatesDir + sep + "deployment.yaml"
 	// ServiceName is the name of the example service file.
-	ServiceName = "service.yaml"
+	ServiceName = TemplatesDir + sep + "service.yaml"
+	// ServiceAccountName is the name of the example serviceaccount file.
+	ServiceAccountName = TemplatesDir + sep + "serviceaccount.yaml"
+	// HorizontalPodAutoscalerName is the name of the example hpa file.
+	HorizontalPodAutoscalerName = TemplatesDir + sep + "hpa.yaml"
 	// NotesName is the name of the example NOTES.txt file.
-	NotesName = "NOTES.txt"
-	// HelpersName is the name of the example NOTES.txt file.
-	HelpersName = "_helpers.tpl"
+	NotesName = TemplatesDir + sep + "NOTES.txt"
+	// HelpersName is the name of the example helpers file.
+	HelpersName = TemplatesDir + sep + "_helpers.tpl"
+	// TestConnectionName is the name of the example test file.
+	TestConnectionName = TemplatesTestsDir + sep + "test-connection.yaml"
 )
+
+// maxChartNameLength is lower than the limits we know of with certain file systems,
+// and with certain Kubernetes fields.
+const maxChartNameLength = 250
+
+const sep = string(filepath.Separator)
+
+const defaultChartfile = `apiVersion: v2
+name: %s
+description: A Helm chart for Kubernetes
+
+# A chart can be either an 'application' or a 'library' chart.
+#
+# Application charts are a collection of templates that can be packaged into versioned archives
+# to be deployed.
+#
+# Library charts provide useful utilities or functions for the chart developer. They're included as
+# a dependency of application charts to inject those utilities and functions into the rendering
+# pipeline. Library charts do not define any templates and therefore cannot be deployed.
+type: application
+
+# This is the chart version. This version number should be incremented each time you make changes
+# to the chart and its templates, including the app version.
+# Versions are expected to follow Semantic Versioning (https://semver.org/)
+version: 0.1.0
+
+# This is the version number of the application being deployed. This version number should be
+# incremented each time you make changes to the application. Versions are not expected to
+# follow Semantic Versioning. They should reflect the version the application is using.
+appVersion: 1.16.0
+`
 
 const defaultValues = `# Default values for %s.
 # This is a YAML-formatted file.
@@ -56,8 +110,35 @@ replicaCount: 1
 
 image:
   repository: nginx
-  tag: stable
   pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
 
 service:
   type: ClusterIP
@@ -68,9 +149,9 @@ ingress:
   annotations: {}
     # kubernetes.io/ingress.class: nginx
     # kubernetes.io/tls-acme: "true"
-  path: /
   hosts:
-    - chart-example.local
+    - host: chart-example.local
+      paths: []
   tls: []
   #  - secretName: chart-example-tls
   #    hosts:
@@ -82,11 +163,18 @@ resources: {}
   # resources, such as Minikube. If you do want to specify resources, uncomment the following
   # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
   # limits:
-  #  cpu: 100m
-  #  memory: 128Mi
+  #   cpu: 100m
+  #   memory: 128Mi
   # requests:
-  #  cpu: 100m
-  #  memory: 128Mi
+  #   cpu: 100m
+  #   memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
 
 nodeSelector: {}
 
@@ -111,78 +199,92 @@ const defaultIgnore = `# Patterns to ignore when building packages.
 *.swp
 *.bak
 *.tmp
+*.orig
 *~
 # Various IDEs
 .project
 .idea/
 *.tmproj
+.vscode/
 `
 
 const defaultIngress = `{{- if .Values.ingress.enabled -}}
 {{- $fullName := include "<CHARTNAME>.fullname" . -}}
-{{- $servicePort := .Values.service.port -}}
-{{- $ingressPath := .Values.ingress.path -}}
+{{- $svcPort := .Values.service.port -}}
+{{- if semverCompare ">=1.14-0" .Capabilities.KubeVersion.GitVersion -}}
+apiVersion: networking.k8s.io/v1beta1
+{{- else -}}
 apiVersion: extensions/v1beta1
+{{- end }}
 kind: Ingress
 metadata:
   name: {{ $fullName }}
   labels:
-    app: {{ template "<CHARTNAME>.name" . }}
-    chart: {{ template "<CHARTNAME>.chart" . }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
-{{- with .Values.ingress.annotations }}
+    {{- include "<CHARTNAME>.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
   annotations:
-{{ toYaml . | indent 4 }}
-{{- end }}
-spec:
-{{- if .Values.ingress.tls }}
-  tls:
-  {{- range .Values.ingress.tls }}
-    - hosts:
-      {{- range .hosts }}
-        - {{ . }}
-      {{- end }}
-      secretName: {{ .secretName }}
+    {{- toYaml . | nindent 4 }}
   {{- end }}
-{{- end }}
+spec:
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
   rules:
-  {{- range .Values.ingress.hosts }}
-    - host: {{ . }}
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
       http:
         paths:
-          - path: {{ $ingressPath }}
+          {{- range .paths }}
+          - path: {{ . }}
             backend:
               serviceName: {{ $fullName }}
-              servicePort: http
+              servicePort: {{ $svcPort }}
+          {{- end }}
+    {{- end }}
   {{- end }}
-{{- end }}
 `
 
-const defaultDeployment = `apiVersion: apps/v1beta2
+const defaultDeployment = `apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ template "<CHARTNAME>.fullname" . }}
+  name: {{ include "<CHARTNAME>.fullname" . }}
   labels:
-    app: {{ template "<CHARTNAME>.name" . }}
-    chart: {{ template "<CHARTNAME>.chart" . }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
+    {{- include "<CHARTNAME>.labels" . | nindent 4 }}
 spec:
+{{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+{{- end }}
   selector:
     matchLabels:
-      app: {{ template "<CHARTNAME>.name" . }}
-      release: {{ .Release.Name }}
+      {{- include "<CHARTNAME>.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+    {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
       labels:
-        app: {{ template "<CHARTNAME>.name" . }}
-        release: {{ .Release.Name }}
+        {{- include "<CHARTNAME>.selectorLabels" . | nindent 8 }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "<CHARTNAME>.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -197,30 +299,27 @@ spec:
               path: /
               port: http
           resources:
-{{ toYaml .Values.resources | indent 12 }}
-    {{- with .Values.nodeSelector }}
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
       nodeSelector:
-{{ toYaml . | indent 8 }}
-    {{- end }}
-    {{- with .Values.affinity }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
       affinity:
-{{ toYaml . | indent 8 }}
-    {{- end }}
-    {{- with .Values.tolerations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
       tolerations:
-{{ toYaml . | indent 8 }}
-    {{- end }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 `
 
 const defaultService = `apiVersion: v1
 kind: Service
 metadata:
-  name: {{ template "<CHARTNAME>.fullname" . }}
+  name: {{ include "<CHARTNAME>.fullname" . }}
   labels:
-    app: {{ template "<CHARTNAME>.name" . }}
-    chart: {{ template "<CHARTNAME>.chart" . }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
+    {{- include "<CHARTNAME>.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -229,38 +328,82 @@ spec:
       protocol: TCP
       name: http
   selector:
-    app: {{ template "<CHARTNAME>.name" . }}
-    release: {{ .Release.Name }}
+    {{- include "<CHARTNAME>.selectorLabels" . | nindent 4 }}
+`
+
+const defaultServiceAccount = `{{- if .Values.serviceAccount.create -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "<CHARTNAME>.serviceAccountName" . }}
+  labels:
+    {{- include "<CHARTNAME>.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+`
+
+const defaultHorizontalPodAutoscaler = `{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "<CHARTNAME>.fullname" . }}
+  labels:
+    {{- include "<CHARTNAME>.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "<CHARTNAME>.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+  {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        targetAverageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  {{- end }}
+  {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        targetAverageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+  {{- end }}
+{{- end }}
 `
 
 const defaultNotes = `1. Get the application URL by running these commands:
 {{- if .Values.ingress.enabled }}
-{{- range .Values.ingress.hosts }}
-  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ . }}{{ $.Values.ingress.path }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ . }}
+  {{- end }}
 {{- end }}
 {{- else if contains "NodePort" .Values.service.type }}
-  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ template "<CHARTNAME>.fullname" . }})
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "<CHARTNAME>.fullname" . }})
   export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
   echo http://$NODE_IP:$NODE_PORT
 {{- else if contains "LoadBalancer" .Values.service.type }}
      NOTE: It may take a few minutes for the LoadBalancer IP to be available.
-           You can watch the status of by running 'kubectl get svc -w {{ template "<CHARTNAME>.fullname" . }}'
-  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ template "<CHARTNAME>.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+           You can watch the status of by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "<CHARTNAME>.fullname" . }}'
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "<CHARTNAME>.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
   echo http://$SERVICE_IP:{{ .Values.service.port }}
 {{- else if contains "ClusterIP" .Values.service.type }}
-  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app={{ template "<CHARTNAME>.name" . }},release={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "<CHARTNAME>.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
   echo "Visit http://127.0.0.1:8080 to use your application"
-  kubectl port-forward $POD_NAME 8080:80
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:80
 {{- end }}
 `
 
-const defaultHelpers = `{{/* vim: set filetype=mustache: */}}
-{{/*
+const defaultHelpers = `{{/*
 Expand the name of the chart.
 */}}
 {{- define "<CHARTNAME>.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
 
 {{/*
 Create a default fully qualified app name.
@@ -268,44 +411,116 @@ We truncate at 63 chars because some Kubernetes name fields are limited to this 
 If release name contains chart name it will be used as a full name.
 */}}
 {{- define "<CHARTNAME>.fullname" -}}
-{{- if .Values.fullnameOverride -}}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- $name := default .Chart.Name .Values.nameOverride -}}
-{{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
 
 {{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "<CHARTNAME>.chart" -}}
-{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels
+*/}}
+{{- define "<CHARTNAME>.labels" -}}
+helm.sh/chart: {{ include "<CHARTNAME>.chart" . }}
+{{ include "<CHARTNAME>.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "<CHARTNAME>.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "<CHARTNAME>.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "<CHARTNAME>.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "<CHARTNAME>.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
 `
 
+const defaultTestConnection = `apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "<CHARTNAME>.fullname" . }}-test-connection"
+  labels:
+    {{- include "<CHARTNAME>.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test-success
+spec:
+  containers:
+    - name: wget
+      image: busybox
+      command: ['wget']
+      args: ['{{ include "<CHARTNAME>.fullname" . }}:{{ .Values.service.port }}']
+  restartPolicy: Never
+`
+
+// Stderr is an io.Writer to which error messages can be written
+//
+// In Helm 4, this will be replaced. It is needed in Helm 3 to preserve API backward
+// compatibility.
+var Stderr io.Writer = os.Stderr
+
 // CreateFrom creates a new chart, but scaffolds it from the src chart.
-func CreateFrom(chartfile *chart.Metadata, dest string, src string) error {
-	schart, err := Load(src)
+func CreateFrom(chartfile *chart.Metadata, dest, src string) error {
+	schart, err := loader.Load(src)
 	if err != nil {
-		return fmt.Errorf("could not load %s: %s", src, err)
+		return errors.Wrapf(err, "could not load %s", src)
 	}
 
 	schart.Metadata = chartfile
 
-	var updatedTemplates []*chart.Template
+	var updatedTemplates []*chart.File
 
 	for _, template := range schart.Templates {
-		newData := Transform(string(template.Data), "<CHARTNAME>", schart.Metadata.Name)
-		updatedTemplates = append(updatedTemplates, &chart.Template{Name: template.Name, Data: newData})
+		newData := transform(string(template.Data), schart.Name())
+		updatedTemplates = append(updatedTemplates, &chart.File{Name: template.Name, Data: newData})
 	}
 
 	schart.Templates = updatedTemplates
-	schart.Values = &chart.Config{Raw: string(Transform(schart.Values.Raw, "<CHARTNAME>", schart.Metadata.Name))}
+	b, err := yaml.Marshal(schart.Values)
+	if err != nil {
+		return errors.Wrap(err, "reading values file")
+	}
+
+	var m map[string]interface{}
+	if err := yaml.Unmarshal(transform(string(b), schart.Name()), &m); err != nil {
+		return errors.Wrap(err, "transforming values file")
+	}
+	schart.Values = m
+
+	// SaveDir looks for the file values.yaml when saving rather than the values
+	// key in order to preserve the comments in the YAML. The name placeholder
+	// needs to be replaced on that file.
+	for _, f := range schart.Raw {
+		if f.Name == ValuesfileName {
+			f.Data = transform(string(f.Data), schart.Name())
+		}
+	}
 
 	return SaveDir(schart, dest)
 }
@@ -323,7 +538,13 @@ func CreateFrom(chartfile *chart.Metadata, dest string, src string) error {
 // If Chart.yaml or any directories cannot be created, this will return an
 // error. In such a case, this will attempt to clean up by removing the
 // new chart directory.
-func Create(chartfile *chart.Metadata, dir string) (string, error) {
+func Create(name, dir string) (string, error) {
+
+	// Sanity-check the name of a chart so user doesn't create one that causes problems.
+	if err := validateChartName(name); err != nil {
+		return "", err
+	}
+
 	path, err := filepath.Abs(dir)
 	if err != nil {
 		return path, err
@@ -332,29 +553,12 @@ func Create(chartfile *chart.Metadata, dir string) (string, error) {
 	if fi, err := os.Stat(path); err != nil {
 		return path, err
 	} else if !fi.IsDir() {
-		return path, fmt.Errorf("no such directory %s", path)
+		return path, errors.Errorf("no such directory %s", path)
 	}
 
-	n := chartfile.Name
-	cdir := filepath.Join(path, n)
+	cdir := filepath.Join(path, name)
 	if fi, err := os.Stat(cdir); err == nil && !fi.IsDir() {
-		return cdir, fmt.Errorf("file %s already exists and is not a directory", cdir)
-	}
-	if err := os.MkdirAll(cdir, 0755); err != nil {
-		return cdir, err
-	}
-
-	cf := filepath.Join(cdir, ChartfileName)
-	if _, err := os.Stat(cf); err != nil {
-		if err := SaveChartfile(cf, chartfile); err != nil {
-			return cdir, err
-		}
-	}
-
-	for _, d := range []string{TemplatesDir, ChartsDir} {
-		if err := os.MkdirAll(filepath.Join(cdir, d), 0755); err != nil {
-			return cdir, err
-		}
+		return cdir, errors.Errorf("file %s already exists and is not a directory", cdir)
 	}
 
 	files := []struct {
@@ -362,9 +566,14 @@ func Create(chartfile *chart.Metadata, dir string) (string, error) {
 		content []byte
 	}{
 		{
+			// Chart.yaml
+			path:    filepath.Join(cdir, ChartfileName),
+			content: []byte(fmt.Sprintf(defaultChartfile, name)),
+		},
+		{
 			// values.yaml
 			path:    filepath.Join(cdir, ValuesfileName),
-			content: []byte(fmt.Sprintf(defaultValues, chartfile.Name)),
+			content: []byte(fmt.Sprintf(defaultValues, name)),
 		},
 		{
 			// .helmignore
@@ -373,39 +582,81 @@ func Create(chartfile *chart.Metadata, dir string) (string, error) {
 		},
 		{
 			// ingress.yaml
-			path:    filepath.Join(cdir, TemplatesDir, IngressFileName),
-			content: Transform(defaultIngress, "<CHARTNAME>", chartfile.Name),
+			path:    filepath.Join(cdir, IngressFileName),
+			content: transform(defaultIngress, name),
 		},
 		{
 			// deployment.yaml
-			path:    filepath.Join(cdir, TemplatesDir, DeploymentName),
-			content: Transform(defaultDeployment, "<CHARTNAME>", chartfile.Name),
+			path:    filepath.Join(cdir, DeploymentName),
+			content: transform(defaultDeployment, name),
 		},
 		{
 			// service.yaml
-			path:    filepath.Join(cdir, TemplatesDir, ServiceName),
-			content: Transform(defaultService, "<CHARTNAME>", chartfile.Name),
+			path:    filepath.Join(cdir, ServiceName),
+			content: transform(defaultService, name),
+		},
+		{
+			// serviceaccount.yaml
+			path:    filepath.Join(cdir, ServiceAccountName),
+			content: transform(defaultServiceAccount, name),
+		},
+		{
+			// hpa.yaml
+			path:    filepath.Join(cdir, HorizontalPodAutoscalerName),
+			content: transform(defaultHorizontalPodAutoscaler, name),
 		},
 		{
 			// NOTES.txt
-			path:    filepath.Join(cdir, TemplatesDir, NotesName),
-			content: Transform(defaultNotes, "<CHARTNAME>", chartfile.Name),
+			path:    filepath.Join(cdir, NotesName),
+			content: transform(defaultNotes, name),
 		},
 		{
 			// _helpers.tpl
-			path:    filepath.Join(cdir, TemplatesDir, HelpersName),
-			content: Transform(defaultHelpers, "<CHARTNAME>", chartfile.Name),
+			path:    filepath.Join(cdir, HelpersName),
+			content: transform(defaultHelpers, name),
+		},
+		{
+			// test-connection.yaml
+			path:    filepath.Join(cdir, TestConnectionName),
+			content: transform(defaultTestConnection, name),
 		},
 	}
 
 	for _, file := range files {
 		if _, err := os.Stat(file.path); err == nil {
-			// File exists and is okay. Skip it.
-			continue
+			// There is no handle to a preferred output stream here.
+			fmt.Fprintf(Stderr, "WARNING: File %q already exists. Overwriting.\n", file.path)
 		}
-		if err := ioutil.WriteFile(file.path, file.content, 0644); err != nil {
+		if err := writeFile(file.path, file.content); err != nil {
 			return cdir, err
 		}
 	}
+	// Need to add the ChartsDir explicitly as it does not contain any file OOTB
+	if err := os.MkdirAll(filepath.Join(cdir, ChartsDir), 0755); err != nil {
+		return cdir, err
+	}
 	return cdir, nil
+}
+
+// transform performs a string replacement of the specified source for
+// a given key with the replacement string
+func transform(src, replacement string) []byte {
+	return []byte(strings.ReplaceAll(src, "<CHARTNAME>", replacement))
+}
+
+func writeFile(name string, content []byte) error {
+	if err := os.MkdirAll(filepath.Dir(name), 0755); err != nil {
+		return err
+	}
+	return ioutil.WriteFile(name, content, 0644)
+}
+
+func validateChartName(name string) error {
+	if name == "" || len(name) > maxChartNameLength {
+		return fmt.Errorf("chart name must be between 1 and %d characters", maxChartNameLength)
+	}
+	if !chartName.MatchString(name) {
+		return fmt.Errorf("chart name must match the regular expression %q", chartName.String())
+	}
+	return nil
 }

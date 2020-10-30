@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,31 +17,26 @@ limitations under the License.
 package main
 
 import (
-	"io"
 	"testing"
 
-	"github.com/spf13/cobra"
-
-	"k8s.io/helm/pkg/helm"
-	"k8s.io/helm/pkg/proto/hapi/release"
+	"helm.sh/helm/v3/pkg/release"
 )
 
 func TestGetManifest(t *testing.T) {
-	tests := []releaseCase{
-		{
-			name:     "get manifest with release",
-			args:     []string{"juno"},
-			expected: helm.MockManifest,
-			resp:     helm.ReleaseMock(&helm.MockReleaseOptions{Name: "juno"}),
-			rels:     []*release.Release{helm.ReleaseMock(&helm.MockReleaseOptions{Name: "juno"})},
-		},
-		{
-			name: "get manifest without args",
-			args: []string{},
-			err:  true,
-		},
-	}
-	runReleaseCases(t, tests, func(c *helm.FakeClient, out io.Writer) *cobra.Command {
-		return newGetManifestCmd(c, out)
-	})
+	tests := []cmdTestCase{{
+		name:   "get manifest with release",
+		cmd:    "get manifest juno",
+		golden: "output/get-manifest.txt",
+		rels:   []*release.Release{release.Mock(&release.MockReleaseOptions{Name: "juno"})},
+	}, {
+		name:      "get manifest without args",
+		cmd:       "get manifest",
+		golden:    "output/get-manifest-no-args.txt",
+		wantError: true,
+	}}
+	runTestCmd(t, tests)
+}
+
+func TestGetManifestRevisionCompletion(t *testing.T) {
+	revisionFlagCompletionTest(t, "get manifest")
 }

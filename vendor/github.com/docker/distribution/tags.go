@@ -1,7 +1,9 @@
 package distribution
 
 import (
-	"github.com/docker/distribution/context"
+	"context"
+
+	digest "github.com/opencontainers/go-digest"
 )
 
 // TagService provides access to information about tagged objects.
@@ -24,4 +26,12 @@ type TagService interface {
 
 	// Lookup returns the set of tags referencing the given digest.
 	Lookup(ctx context.Context, digest Descriptor) ([]string, error)
+}
+
+// TagManifestsProvider provides method to retreive the digests of manifests that a tag historically
+// pointed to
+type TagManifestsProvider interface {
+	// ManifestDigests returns set of digests that this tag historically pointed to. This also
+	// includes currently linked digest. There is no ordering guaranteed
+	ManifestDigests(ctx context.Context, tag string) ([]digest.Digest, error)
 }

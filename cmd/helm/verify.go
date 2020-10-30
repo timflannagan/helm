@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,18 +16,19 @@ limitations under the License.
 package main
 
 import (
-	"errors"
+	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/helm/pkg/downloader"
+	"helm.sh/helm/v3/cmd/helm/require"
+	"helm.sh/helm/v3/pkg/action"
 )
 
 const verifyDesc = `
 Verify that the given chart has a valid provenance file.
 
-Provenance files provide crytographic verification that a chart has not been
+Provenance files provide cryptographic verification that a chart has not been
 tampered with, and was packaged by a trusted provider.
 
 This command can be used to verify a local chart. Several other commands provide
@@ -35,36 +36,27 @@ This command can be used to verify a local chart. Several other commands provide
 the 'helm package --sign' command.
 `
 
-type verifyCmd struct {
-	keyring   string
-	chartfile string
-
-	out io.Writer
-}
-
 func newVerifyCmd(out io.Writer) *cobra.Command {
-	vc := &verifyCmd{out: out}
+	client := action.NewVerify()
 
 	cmd := &cobra.Command{
-		Use:   "verify [flags] PATH",
+		Use:   "verify PATH",
 		Short: "verify that a chart at the given path has been signed and is valid",
 		Long:  verifyDesc,
+		Args:  require.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return errors.New("a path to a package file is required")
+			err := client.Run(args[0])
+			if err != nil {
+				return err
 			}
-			vc.chartfile = args[0]
-			return vc.run()
+
+			fmt.Fprint(out, client.Out)
+
+			return nil
 		},
 	}
 
-	f := cmd.Flags()
-	f.StringVar(&vc.keyring, "keyring", defaultKeyring(), "keyring containing public keys")
+	cmd.Flags().StringVar(&client.Keyring, "keyring", defaultKeyring(), "keyring containing public keys")
 
 	return cmd
-}
-
-func (v *verifyCmd) run() error {
-	_, err := downloader.VerifyChart(v.chartfile, v.keyring)
-	return err
 }

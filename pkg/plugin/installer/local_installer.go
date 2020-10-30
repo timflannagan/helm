@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -13,12 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package installer // import "k8s.io/helm/pkg/plugin/installer"
+package installer // import "helm.sh/helm/v3/pkg/plugin/installer"
 
 import (
+	"os"
 	"path/filepath"
 
-	"k8s.io/helm/pkg/helm/helmpath"
+	"github.com/pkg/errors"
 )
 
 // LocalInstaller installs plugins from the filesystem.
@@ -27,25 +28,26 @@ type LocalInstaller struct {
 }
 
 // NewLocalInstaller creates a new LocalInstaller.
-func NewLocalInstaller(source string, home helmpath.Home) (*LocalInstaller, error) {
+func NewLocalInstaller(source string) (*LocalInstaller, error) {
+	src, err := filepath.Abs(source)
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to get absolute path to plugin")
+	}
 	i := &LocalInstaller{
-		base: newBase(source, home),
+		base: newBase(src),
 	}
 	return i, nil
 }
 
-// Install creates a symlink to the plugin directory in $HELM_HOME.
+// Install creates a symlink to the plugin directory.
 //
 // Implements Installer.
 func (i *LocalInstaller) Install() error {
 	if !isPlugin(i.Source) {
 		return ErrMissingMetadata
 	}
-	src, err := filepath.Abs(i.Source)
-	if err != nil {
-		return err
-	}
-	return i.link(src)
+	debug("symlinking %s to %s", i.Source, i.Path())
+	return os.Symlink(i.Source, i.Path())
 }
 
 // Update updates a local repository

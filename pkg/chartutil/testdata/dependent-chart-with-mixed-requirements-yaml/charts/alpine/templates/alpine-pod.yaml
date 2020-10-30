@@ -3,11 +3,9 @@ kind: Pod
 metadata:
   name: {{.Release.Name}}-{{.Chart.Name}}
   labels:
-    heritage: {{.Release.Service}}
+    app.kubernetes.io/managed-by: {{.Release.Service}}
     chartName: {{.Chart.Name}}
     chartVersion: {{.Chart.Version | quote}}
-  annotations:
-    "helm.sh/created": "{{.Release.Time.Seconds}}"
 spec:
   restartPolicy: {{default "Never" .restart_policy}}
   containers:

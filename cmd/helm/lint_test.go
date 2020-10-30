@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,24 +17,22 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"testing"
 )
 
-var (
-	values            = []byte{}
-	namespace         = "testNamespace"
-	strict            = false
-	archivedChartPath = "testdata/testcharts/compressedchart-0.1.0.tgz"
-	chartDirPath      = "testdata/testcharts/decompressedchart/"
-)
-
-func TestLintChart(t *testing.T) {
-	if _, err := lintChart(chartDirPath, values, namespace, strict); err != nil {
-		t.Errorf("%s", err)
-	}
-
-	if _, err := lintChart(archivedChartPath, values, namespace, strict); err != nil {
-		t.Errorf("%s", err)
-	}
-
+func TestLintCmdWithSubchartsFlag(t *testing.T) {
+	testChart := "testdata/testcharts/chart-with-bad-subcharts"
+	tests := []cmdTestCase{{
+		name:      "lint good chart with bad subcharts",
+		cmd:       fmt.Sprintf("lint %s", testChart),
+		golden:    "output/lint-chart-with-bad-subcharts.txt",
+		wantError: false,
+	}, {
+		name:      "lint good chart with bad subcharts using --with-subcharts flag",
+		cmd:       fmt.Sprintf("lint --with-subcharts %s", testChart),
+		golden:    "output/lint-chart-with-bad-subcharts-with-subcharts.txt",
+		wantError: true,
+	}}
+	runTestCmd(t, tests)
 }

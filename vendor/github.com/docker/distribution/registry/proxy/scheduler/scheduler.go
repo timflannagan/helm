@@ -1,12 +1,13 @@
 package scheduler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/docker/distribution/context"
+	dcontext "github.com/docker/distribution/context"
 	"github.com/docker/distribution/reference"
 	"github.com/docker/distribution/registry/storage/driver"
 )
@@ -117,15 +118,15 @@ func (ttles *TTLExpirationScheduler) Start() error {
 	}
 
 	if !ttles.stopped {
-		return fmt.Errorf("Scheduler already started")
+		return fmt.Errorf("scheduler already started")
 	}
 
-	context.GetLogger(ttles.ctx).Infof("Starting cached object TTL expiration scheduler...")
+	dcontext.GetLogger(ttles.ctx).Infof("Starting cached object TTL expiration scheduler...")
 	ttles.stopped = false
 
 	// Start timer for each deserialized entry
 	for _, entry := range ttles.entries {
-		entry.timer = ttles.startTimer(entry, entry.Expiry.Sub(time.Now()))
+		entry.timer = ttles.startTimer(entry, time.Until(entry.Expiry))
 	}
 
 	// Start a ticker to periodically save the entries index
@@ -142,7 +143,7 @@ func (ttles *TTLExpirationScheduler) Start() error {
 
 				err := ttles.writeState()
 				if err != nil {
-					context.GetLogger(ttles.ctx).Errorf("Error writing scheduler state: %s", err)
+					dcontext.GetLogger(ttles.ctx).Errorf("Error writing scheduler state: %s", err)
 				} else {
 					ttles.indexDirty = false
 				}
@@ -163,7 +164,7 @@ func (ttles *TTLExpirationScheduler) add(r reference.Reference, ttl time.Duratio
 		Expiry:    time.Now().Add(ttl),
 		EntryType: eType,
 	}
-	context.GetLogger(ttles.ctx).Infof("Adding new scheduler entry for %s with ttl=%s", entry.Key, entry.Expiry.Sub(time.Now()))
+	dcontext.GetLogger(ttles.ctx).Infof("Adding new scheduler entry for %s with ttl=%s", entry.Key, time.Until(entry.Expiry))
 	if oldEntry, present := ttles.entries[entry.Key]; present && oldEntry.timer != nil {
 		oldEntry.timer.Stop()
 	}
@@ -193,10 +194,10 @@ func (ttles *TTLExpirationScheduler) startTimer(entry *schedulerEntry, ttl time.
 		ref, err := reference.Parse(entry.Key)
 		if err == nil {
 			if err := f(ref); err != nil {
-				context.GetLogger(ttles.ctx).Errorf("Scheduler error returned from OnExpire(%s): %s", entry.Key, err)
+				dcontext.GetLogger(ttles.ctx).Errorf("Scheduler error returned from OnExpire(%s): %s", entry.Key, err)
 			}
 		} else {
-			context.GetLogger(ttles.ctx).Errorf("Error unpacking reference: %s", err)
+			dcontext.GetLogger(ttles.ctx).Errorf("Error unpacking reference: %s", err)
 		}
 
 		delete(ttles.entries, entry.Key)
@@ -210,7 +211,7 @@ func (ttles *TTLExpirationScheduler) Stop() {
 	defer ttles.Unlock()
 
 	if err := ttles.writeState(); err != nil {
-		context.GetLogger(ttles.ctx).Errorf("Error writing scheduler state: %s", err)
+		dcontext.GetLogger(ttles.ctx).Errorf("Error writing scheduler state: %s", err)
 	}
 
 	for _, entry := range ttles.entries {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2016 The Kubernetes Authors All rights reserved.
+# Copyright The Helm Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,18 +20,25 @@ find_files() {
   find . -not \( \
     \( \
       -wholename './vendor' \
-      -o -wholename './pkg/proto' \
       -o -wholename '*testdata*' \
+      -o -wholename '*third_party*' \
     \) -prune \
   \) \
-  \( -name '*.go' -o -name '*.sh' -o -name 'Dockerfile' \)
+  \( -name '*.go' -o -name '*.sh' \)
 }
 
-failed=($(find_files | xargs grep -L 'Licensed under the Apache License, Version 2.0 (the "License");'))
-if (( ${#failed[@]} > 0 )); then
+# Use "|| :" to ignore the error code when grep returns empty
+failed_license_header=($(find_files | xargs grep -L 'Licensed under the Apache License, Version 2.0 (the "License")' || :))
+if (( ${#failed_license_header[@]} > 0 )); then
   echo "Some source files are missing license headers."
-  for f in "${failed[@]}"; do
-    echo "  $f"
-  done
+  printf '%s\n' "${failed_license_header[@]}"
+  exit 1
+fi
+
+# Use "|| :" to ignore the error code when grep returns empty
+failed_copyright_header=($(find_files | xargs grep -L 'Copyright The Helm Authors.' || :))
+if (( ${#failed_copyright_header[@]} > 0 )); then
+  echo "Some source files are missing the copyright header."
+  printf '%s\n' "${failed_copyright_header[@]}"
   exit 1
 fi

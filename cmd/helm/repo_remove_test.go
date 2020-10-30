@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,63 +19,144 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"k8s.io/helm/pkg/helm/helmpath"
-	"k8s.io/helm/pkg/repo"
-	"k8s.io/helm/pkg/repo/repotest"
+	"helm.sh/helm/v3/internal/test/ensure"
+	"helm.sh/helm/v3/pkg/helmpath"
+	"helm.sh/helm/v3/pkg/repo"
+	"helm.sh/helm/v3/pkg/repo/repotest"
 )
 
 func TestRepoRemove(t *testing.T) {
-	ts, thome, err := repotest.NewTempServer("testdata/testserver/*.*")
+	ts, err := repotest.NewTempServer("testdata/testserver/*.*")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer ts.Stop()
 
-	hh := helmpath.Home(thome)
-	cleanup := resetEnv()
-	defer func() {
-		ts.Stop()
-		os.Remove(thome.String())
-		cleanup()
-	}()
-	if err := ensureTestHome(hh, t); err != nil {
-		t.Fatal(err)
-	}
+	rootDir := ensure.TempDir(t)
+	repoFile := filepath.Join(rootDir, "repositories.yaml")
 
-	settings.Home = thome
+	const testRepoName = "test-name"
 
 	b := bytes.NewBuffer(nil)
 
-	if err := removeRepoLine(b, testName, hh); err == nil {
-		t.Errorf("Expected error removing %s, but did not get one.", testName)
+	rmOpts := repoRemoveOptions{
+		names:     []string{testRepoName},
+		repoFile:  repoFile,
+		repoCache: rootDir,
 	}
-	if err := addRepository(testName, ts.URL(), hh, "", "", "", true); err != nil {
+
+	if err := rmOpts.run(os.Stderr); err == nil {
+		t.Errorf("Expected error removing %s, but did not get one.", testRepoName)
+	}
+	o := &repoAddOptions{
+		name:     testRepoName,
+		url:      ts.URL(),
+		repoFile: repoFile,
+	}
+
+	if err := o.run(os.Stderr); err != nil {
 		t.Error(err)
 	}
 
-	mf, _ := os.Create(hh.CacheIndex(testName))
-	mf.Close()
+	cacheIndexFile, cacheChartsFile := createCacheFiles(rootDir, testRepoName)
 
+	// Reset the buffer before running repo remove
 	b.Reset()
-	if err := removeRepoLine(b, testName, hh); err != nil {
-		t.Errorf("Error removing %s from repositories", testName)
+
+	if err := rmOpts.run(b); err != nil {
+		t.Errorf("Error removing %s from repositories", testRepoName)
 	}
 	if !strings.Contains(b.String(), "has been removed") {
 		t.Errorf("Unexpected output: %s", b.String())
 	}
 
-	if _, err := os.Stat(hh.CacheIndex(testName)); err == nil {
-		t.Errorf("Error cache file was not removed for repository %s", testName)
-	}
+	testCacheFiles(t, cacheIndexFile, cacheChartsFile, testRepoName)
 
-	f, err := repo.LoadRepositoriesFile(hh.RepositoryFile())
+	f, err := repo.LoadFile(repoFile)
 	if err != nil {
 		t.Error(err)
 	}
 
-	if f.Has(testName) {
-		t.Errorf("%s was not successfully removed from repositories list", testName)
+	if f.Has(testRepoName) {
+		t.Errorf("%s was not successfully removed from repositories list", testRepoName)
+	}
+
+	// Test removal of multiple repos in one go
+	var testRepoNames = []string{"foo", "bar", "baz"}
+	cacheFiles := make(map[string][]string, len(testRepoNames))
+
+	// Add test repos
+	for _, repoName := range testRepoNames {
+		o := &repoAddOptions{
+			name:     repoName,
+			url:      ts.URL(),
+			repoFile: repoFile,
+		}
+
+		if err := o.run(os.Stderr); err != nil {
+			t.Error(err)
+		}
+
+		cacheIndex, cacheChart := createCacheFiles(rootDir, repoName)
+		cacheFiles[repoName] = []string{cacheIndex, cacheChart}
+
+	}
+
+	// Create repo remove command
+	multiRmOpts := repoRemoveOptions{
+		names:     testRepoNames,
+		repoFile:  repoFile,
+		repoCache: rootDir,
+	}
+
+	// Reset the buffer before running repo remove
+	b.Reset()
+
+	// Run repo remove command
+	if err := multiRmOpts.run(b); err != nil {
+		t.Errorf("Error removing list of repos from repositories: %q", testRepoNames)
+	}
+
+	// Check that stuff were removed
+	if !strings.Contains(b.String(), "has been removed") {
+		t.Errorf("Unexpected output: %s", b.String())
+	}
+
+	for _, repoName := range testRepoNames {
+		f, err := repo.LoadFile(repoFile)
+		if err != nil {
+			t.Error(err)
+		}
+		if f.Has(repoName) {
+			t.Errorf("%s was not successfully removed from repositories list", repoName)
+		}
+		cacheIndex := cacheFiles[repoName][0]
+		cacheChart := cacheFiles[repoName][1]
+		testCacheFiles(t, cacheIndex, cacheChart, repoName)
+	}
+}
+
+func createCacheFiles(rootDir string, repoName string) (cacheIndexFile string, cacheChartsFile string) {
+	cacheIndexFile = filepath.Join(rootDir, helmpath.CacheIndexFile(repoName))
+	mf, _ := os.Create(cacheIndexFile)
+	mf.Close()
+
+	cacheChartsFile = filepath.Join(rootDir, helmpath.CacheChartsFile(repoName))
+	mf, _ = os.Create(cacheChartsFile)
+	mf.Close()
+
+	return cacheIndexFile, cacheChartsFile
+}
+
+func testCacheFiles(t *testing.T, cacheIndexFile string, cacheChartsFile string, repoName string) {
+	if _, err := os.Stat(cacheIndexFile); err == nil {
+		t.Errorf("Error cache index file was not removed for repository %s", repoName)
+	}
+	if _, err := os.Stat(cacheChartsFile); err == nil {
+		t.Errorf("Error cache chart file was not removed for repository %s", repoName)
 	}
 }

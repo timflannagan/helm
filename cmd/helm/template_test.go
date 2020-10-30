@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,151 +17,140 @@ limitations under the License.
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-var chartPath = "./../../pkg/chartutil/testdata/subpop/charts/subchart1"
+var chartPath = "testdata/testcharts/subchart"
 
 func TestTemplateCmd(t *testing.T) {
-	absChartPath, err := filepath.Abs(chartPath)
-	if err != nil {
-		t.Fatal(err)
+	tests := []cmdTestCase{
+		{
+			name:   "check name",
+			cmd:    fmt.Sprintf("template '%s'", chartPath),
+			golden: "output/template.txt",
+		},
+		{
+			name:   "check set name",
+			cmd:    fmt.Sprintf("template '%s' --set service.name=apache", chartPath),
+			golden: "output/template-set.txt",
+		},
+		{
+			name:   "check values files",
+			cmd:    fmt.Sprintf("template '%s' --values '%s'", chartPath, filepath.Join(chartPath, "/charts/subchartA/values.yaml")),
+			golden: "output/template-values-files.txt",
+		},
+		{
+			name:   "check name template",
+			cmd:    fmt.Sprintf(`template '%s' --name-template='foobar-{{ b64enc "abc" }}-baz'`, chartPath),
+			golden: "output/template-name-template.txt",
+		},
+		{
+			name:      "check no args",
+			cmd:       "template",
+			wantError: true,
+			golden:    "output/template-no-args.txt",
+		},
+		{
+			name:      "check library chart",
+			cmd:       fmt.Sprintf("template '%s'", "testdata/testcharts/lib-chart"),
+			wantError: true,
+			golden:    "output/template-lib-chart.txt",
+		},
+		{
+			name:      "check chart bad type",
+			cmd:       fmt.Sprintf("template '%s'", "testdata/testcharts/chart-bad-type"),
+			wantError: true,
+			golden:    "output/install-chart-bad-type.txt",
+		},
+		{
+			name:   "check chart with dependency which is an app chart acting as a library chart",
+			cmd:    fmt.Sprintf("template '%s'", "testdata/testcharts/chart-with-template-lib-dep"),
+			golden: "output/template-chart-with-template-lib-dep.txt",
+		},
+		{
+			name:   "check chart with dependency which is an app chart archive acting as a library chart",
+			cmd:    fmt.Sprintf("template '%s'", "testdata/testcharts/chart-with-template-lib-archive-dep"),
+			golden: "output/template-chart-with-template-lib-archive-dep.txt",
+		},
+		{
+			name:   "check kube api versions",
+			cmd:    fmt.Sprintf("template --api-versions helm.k8s.io/test '%s'", chartPath),
+			golden: "output/template-with-api-version.txt",
+		},
+		{
+			name:   "template with CRDs",
+			cmd:    fmt.Sprintf("template '%s' --include-crds", chartPath),
+			golden: "output/template-with-crds.txt",
+		},
+		{
+			name:   "template with show-only one",
+			cmd:    fmt.Sprintf("template '%s' --show-only templates/service.yaml", chartPath),
+			golden: "output/template-show-only-one.txt",
+		},
+		{
+			name:   "template with show-only multiple",
+			cmd:    fmt.Sprintf("template '%s' --show-only templates/service.yaml --show-only charts/subcharta/templates/service.yaml", chartPath),
+			golden: "output/template-show-only-multiple.txt",
+		},
+		{
+			name:   "template with show-only glob",
+			cmd:    fmt.Sprintf("template '%s' --show-only templates/subdir/role*", chartPath),
+			golden: "output/template-show-only-glob.txt",
+			// Repeat to ensure manifest ordering regressions are caught
+			repeat: 10,
+		},
+		{
+			name:   "sorted output of manifests (order of filenames, then order of objects within each YAML file)",
+			cmd:    fmt.Sprintf("template '%s'", "testdata/testcharts/object-order"),
+			golden: "output/object-order.txt",
+			// Helm previously used random file order. Repeat the test so we
+			// don't accidentally get the expected result.
+			repeat: 10,
+		},
+		{
+			name:      "chart with template with invalid yaml",
+			cmd:       fmt.Sprintf("template '%s'", "testdata/testcharts/chart-with-template-with-invalid-yaml"),
+			wantError: true,
+			golden:    "output/template-with-invalid-yaml.txt",
+		},
+		{
+			name:      "chart with template with invalid yaml (--debug)",
+			cmd:       fmt.Sprintf("template '%s' --debug", "testdata/testcharts/chart-with-template-with-invalid-yaml"),
+			wantError: true,
+			golden:    "output/template-with-invalid-yaml-debug.txt",
+		},
 	}
-	tests := []struct {
-		name        string
-		desc        string
-		args        []string
-		expectKey   string
-		expectValue string
-	}{
-		{
-			name:        "check_name",
-			desc:        "check for a known name in chart",
-			args:        []string{chartPath},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "protocol: TCP\n    name: nginx",
-		},
-		{
-			name:        "check_set_name",
-			desc:        "verify --set values exist",
-			args:        []string{chartPath, "-x", "templates/service.yaml", "--set", "service.name=apache"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "protocol: TCP\n    name: apache",
-		},
-		{
-			name:        "check_execute",
-			desc:        "verify --execute single template",
-			args:        []string{chartPath, "-x", "templates/service.yaml", "--set", "service.name=apache"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "protocol: TCP\n    name: apache",
-		},
-		{
-			name:        "check_execute_absolute",
-			desc:        "verify --execute single template",
-			args:        []string{chartPath, "-x", absChartPath + "/" + "templates/service.yaml", "--set", "service.name=apache"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "protocol: TCP\n    name: apache",
-		},
-		{
-			name:        "check_namespace",
-			desc:        "verify --namespace",
-			args:        []string{chartPath, "--namespace", "test"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "namespace: \"test\"",
-		},
-		{
-			name:        "check_release_name",
-			desc:        "verify --release exists",
-			args:        []string{chartPath, "--name", "test"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "release-name: \"test\"",
-		},
-		{
-			name:        "check_notes",
-			desc:        "verify --notes shows notes",
-			args:        []string{chartPath, "--notes", "true"},
-			expectKey:   "subchart1/templates/NOTES.txt",
-			expectValue: "Sample notes for subchart1",
-		},
-		{
-			name:        "check_values_files",
-			desc:        "verify --values files values exist",
-			args:        []string{chartPath, "--values", chartPath + "/charts/subchartA/values.yaml"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "name: apache",
-		},
-		{
-			name:        "check_name_template",
-			desc:        "verify --name-template result exists",
-			args:        []string{chartPath, "--name-template", "foobar-{{ b64enc \"abc\" }}-baz"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "release-name: \"foobar-YWJj-baz\"",
-		},
-		{
-			name:        "check_kube_version",
-			desc:        "verify --kube-version overrides the kubernetes version",
-			args:        []string{chartPath, "--kube-version", "1.6"},
-			expectKey:   "subchart1/templates/service.yaml",
-			expectValue: "kube-version/major: \"1\"\n    kube-version/minor: \"6\"\n    kube-version/gitversion: \"v1.6.0\"",
-		},
-	}
+	runTestCmd(t, tests)
+}
 
-	var buf bytes.Buffer
-	for _, tt := range tests {
-		t.Run(tt.name, func(T *testing.T) {
-			// capture stdout
-			old := os.Stdout
-			r, w, _ := os.Pipe()
-			os.Stdout = w
-			// execute template command
-			out := bytes.NewBuffer(nil)
-			cmd := newTemplateCmd(out)
-			cmd.SetArgs(tt.args)
-			err := cmd.Execute()
-			if err != nil {
-				t.Errorf("expected: %v, got %v", tt.expectValue, err)
-			}
-			// restore stdout
-			w.Close()
-			os.Stdout = old
-			var b bytes.Buffer
-			io.Copy(&b, r)
-			r.Close()
-			// scan yaml into map[<path>]yaml
-			scanner := bufio.NewScanner(&b)
-			next := false
-			lastKey := ""
-			m := map[string]string{}
-			for scanner.Scan() {
-				if scanner.Text() == "---" {
-					next = true
-				} else if next {
-					// remove '# Source: '
-					head := "# Source: "
-					lastKey = scanner.Text()[len(head):]
-					next = false
-				} else {
-					m[lastKey] = m[lastKey] + scanner.Text() + "\n"
-				}
-			}
-			if err := scanner.Err(); err != nil {
-				fmt.Fprintln(os.Stderr, "reading standard input:", err)
-			}
-			if v, ok := m[tt.expectKey]; ok {
-				if !strings.Contains(v, tt.expectValue) {
-					t.Errorf("failed to match expected value %s in %s", tt.expectValue, v)
-				}
-			} else {
-				t.Errorf("could not find key %s", tt.expectKey)
-			}
-			buf.Reset()
-		})
-	}
+func TestTemplateVersionCompletion(t *testing.T) {
+	repoFile := "testdata/helmhome/helm/repositories.yaml"
+	repoCache := "testdata/helmhome/helm/repository"
+
+	repoSetup := fmt.Sprintf("--repository-config %s --repository-cache %s", repoFile, repoCache)
+
+	tests := []cmdTestCase{{
+		name:   "completion for template version flag with release name",
+		cmd:    fmt.Sprintf("%s __complete template releasename testing/alpine --version ''", repoSetup),
+		golden: "output/version-comp.txt",
+	}, {
+		name:   "completion for template version flag with generate-name",
+		cmd:    fmt.Sprintf("%s __complete template --generate-name testing/alpine --version ''", repoSetup),
+		golden: "output/version-comp.txt",
+	}, {
+		name:   "completion for template version flag too few args",
+		cmd:    fmt.Sprintf("%s __complete template testing/alpine --version ''", repoSetup),
+		golden: "output/version-invalid-comp.txt",
+	}, {
+		name:   "completion for template version flag too many args",
+		cmd:    fmt.Sprintf("%s __complete template releasename testing/alpine badarg --version ''", repoSetup),
+		golden: "output/version-invalid-comp.txt",
+	}, {
+		name:   "completion for template version flag invalid chart",
+		cmd:    fmt.Sprintf("%s __complete template releasename invalid/invalid --version ''", repoSetup),
+		golden: "output/version-invalid-comp.txt",
+	}}
+	runTestCmd(t, tests)
 }

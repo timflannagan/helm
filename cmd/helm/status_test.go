@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,154 +17,157 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
-	"fmt"
-	"io"
-	"strings"
 	"testing"
+	"time"
 
-	"github.com/golang/protobuf/ptypes/timestamp"
-	"github.com/spf13/cobra"
-
-	"k8s.io/helm/pkg/helm"
-	"k8s.io/helm/pkg/proto/hapi/release"
-	"k8s.io/helm/pkg/timeconv"
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/release"
+	helmtime "helm.sh/helm/v3/pkg/time"
 )
-
-var (
-	date       = timestamp.Timestamp{Seconds: 242085845, Nanos: 0}
-	dateString = timeconv.String(&date)
-)
-
-// statusCase describes a test case dealing with the status of a release
-type statusCase struct {
-	name     string
-	args     []string
-	flags    []string
-	expected string
-	err      bool
-	rel      *release.Release
-}
 
 func TestStatusCmd(t *testing.T) {
-	tests := []statusCase{
-		{
-			name:     "get status of a deployed release",
-			args:     []string{"flummoxed-chickadee"},
-			expected: outputWithStatus("DEPLOYED\n\n"),
-			rel: releaseMockWithStatus(&release.Status{
-				Code: release.Status_DEPLOYED,
-			}),
-		},
-		{
-			name:     "get status of a deployed release with notes",
-			args:     []string{"flummoxed-chickadee"},
-			expected: outputWithStatus("DEPLOYED\n\nNOTES:\nrelease notes\n"),
-			rel: releaseMockWithStatus(&release.Status{
-				Code:  release.Status_DEPLOYED,
-				Notes: "release notes",
-			}),
-		},
-		{
-			name:     "get status of a deployed release with notes in json",
-			args:     []string{"flummoxed-chickadee"},
-			flags:    []string{"-o", "json"},
-			expected: `{"name":"flummoxed-chickadee","info":{"status":{"code":1,"notes":"release notes"},"first_deployed":{"seconds":242085845},"last_deployed":{"seconds":242085845}}}`,
-			rel: releaseMockWithStatus(&release.Status{
-				Code:  release.Status_DEPLOYED,
-				Notes: "release notes",
-			}),
-		},
-		{
-			name:     "get status of a deployed release with resources",
-			args:     []string{"flummoxed-chickadee"},
-			expected: outputWithStatus("DEPLOYED\n\nRESOURCES:\nresource A\nresource B\n\n"),
-			rel: releaseMockWithStatus(&release.Status{
-				Code:      release.Status_DEPLOYED,
-				Resources: "resource A\nresource B\n",
-			}),
-		},
-		{
-			name:     "get status of a deployed release with resources in YAML",
-			args:     []string{"flummoxed-chickadee"},
-			flags:    []string{"-o", "yaml"},
-			expected: "info:\nfirst_deployed:\nseconds:242085845\nlast_deployed:\nseconds:242085845\nstatus:\ncode:1\nresources:|\nresourceA\nresourceB\nname:flummoxed-chickadee\n",
-			rel: releaseMockWithStatus(&release.Status{
-				Code:      release.Status_DEPLOYED,
-				Resources: "resource A\nresource B\n",
-			}),
-		},
-		{
-			name: "get status of a deployed release with test suite",
-			args: []string{"flummoxed-chickadee"},
-			expected: outputWithStatus(
-				fmt.Sprintf("DEPLOYED\n\nTEST SUITE:\nLast Started: %s\nLast Completed: %s\n\n", dateString, dateString) +
-					"TEST \tSTATUS \tINFO \tSTARTED \tCOMPLETED \n" +
-					fmt.Sprintf("test run 1\tSUCCESS \textra info\t%s\t%s\n", dateString, dateString) +
-					fmt.Sprintf("test run 2\tFAILURE \t \t%s\t%s\n", dateString, dateString)),
-			rel: releaseMockWithStatus(&release.Status{
-				Code: release.Status_DEPLOYED,
-				LastTestSuiteRun: &release.TestSuite{
-					StartedAt:   &date,
-					CompletedAt: &date,
-					Results: []*release.TestRun{
-						{
-							Name:        "test run 1",
-							Status:      release.TestRun_SUCCESS,
-							Info:        "extra info",
-							StartedAt:   &date,
-							CompletedAt: &date,
-						},
-						{
-							Name:        "test run 2",
-							Status:      release.TestRun_FAILURE,
-							StartedAt:   &date,
-							CompletedAt: &date,
-						},
-					},
+	releasesMockWithStatus := func(info *release.Info, hooks ...*release.Hook) []*release.Release {
+		info.LastDeployed = helmtime.Unix(1452902400, 0).UTC()
+		return []*release.Release{{
+			Name:      "flummoxed-chickadee",
+			Namespace: "default",
+			Info:      info,
+			Chart:     &chart.Chart{},
+			Hooks:     hooks,
+		}}
+	}
+
+	tests := []cmdTestCase{{
+		name:   "get status of a deployed release",
+		cmd:    "status flummoxed-chickadee",
+		golden: "output/status.txt",
+		rels: releasesMockWithStatus(&release.Info{
+			Status: release.StatusDeployed,
+		}),
+	}, {
+		name:   "get status of a deployed release with notes",
+		cmd:    "status flummoxed-chickadee",
+		golden: "output/status-with-notes.txt",
+		rels: releasesMockWithStatus(&release.Info{
+			Status: release.StatusDeployed,
+			Notes:  "release notes",
+		}),
+	}, {
+		name:   "get status of a deployed release with notes in json",
+		cmd:    "status flummoxed-chickadee -o json",
+		golden: "output/status.json",
+		rels: releasesMockWithStatus(&release.Info{
+			Status: release.StatusDeployed,
+			Notes:  "release notes",
+		}),
+	}, {
+		name:   "get status of a deployed release with test suite",
+		cmd:    "status flummoxed-chickadee",
+		golden: "output/status-with-test-suite.txt",
+		rels: releasesMockWithStatus(
+			&release.Info{
+				Status: release.StatusDeployed,
+			},
+			&release.Hook{
+				Name:   "never-run-test",
+				Events: []release.HookEvent{release.HookTest},
+			},
+			&release.Hook{
+				Name:   "passing-test",
+				Events: []release.HookEvent{release.HookTest},
+				LastRun: release.HookExecution{
+					StartedAt:   mustParseTime("2006-01-02T15:04:05Z"),
+					CompletedAt: mustParseTime("2006-01-02T15:04:07Z"),
+					Phase:       release.HookPhaseSucceeded,
 				},
-			}),
-		},
-	}
-
-	scmd := func(c *helm.FakeClient, out io.Writer) *cobra.Command {
-		return newStatusCmd(c, out)
-	}
-
-	var buf bytes.Buffer
-	for _, tt := range tests {
-		c := &helm.FakeClient{
-			Rels: []*release.Release{tt.rel},
-		}
-		cmd := scmd(c, &buf)
-		cmd.ParseFlags(tt.flags)
-		err := cmd.RunE(cmd, tt.args)
-		if (err != nil) != tt.err {
-			t.Errorf("%q. expected error, got '%v'", tt.name, err)
-		}
-
-		expected := strings.Replace(tt.expected, " ", "", -1)
-		got := strings.Replace(buf.String(), " ", "", -1)
-		if expected != got {
-			t.Errorf("%q. expected\n%q\ngot\n%q", tt.name, expected, got)
-		}
-		buf.Reset()
-	}
+			},
+			&release.Hook{
+				Name:   "failing-test",
+				Events: []release.HookEvent{release.HookTest},
+				LastRun: release.HookExecution{
+					StartedAt:   mustParseTime("2006-01-02T15:10:05Z"),
+					CompletedAt: mustParseTime("2006-01-02T15:10:07Z"),
+					Phase:       release.HookPhaseFailed,
+				},
+			},
+			&release.Hook{
+				Name:   "passing-pre-install",
+				Events: []release.HookEvent{release.HookPreInstall},
+				LastRun: release.HookExecution{
+					StartedAt:   mustParseTime("2006-01-02T15:00:05Z"),
+					CompletedAt: mustParseTime("2006-01-02T15:00:07Z"),
+					Phase:       release.HookPhaseSucceeded,
+				},
+			},
+		),
+	}}
+	runTestCmd(t, tests)
 }
 
-func outputWithStatus(status string) string {
-	return fmt.Sprintf("LAST DEPLOYED: %s\nNAMESPACE: \nSTATUS: %s",
-		dateString,
-		status)
+func mustParseTime(t string) helmtime.Time {
+	res, _ := helmtime.Parse(time.RFC3339, t)
+	return res
 }
 
-func releaseMockWithStatus(status *release.Status) *release.Release {
-	return &release.Release{
-		Name: "flummoxed-chickadee",
-		Info: &release.Info{
-			FirstDeployed: &date,
-			LastDeployed:  &date,
-			Status:        status,
-		},
+func TestStatusCompletion(t *testing.T) {
+	releasesMockWithStatus := func(info *release.Info, hooks ...*release.Hook) []*release.Release {
+		info.LastDeployed = helmtime.Unix(1452902400, 0).UTC()
+		return []*release.Release{{
+			Name:      "athos",
+			Namespace: "default",
+			Info:      info,
+			Chart:     &chart.Chart{},
+			Hooks:     hooks,
+		}, {
+			Name:      "porthos",
+			Namespace: "default",
+			Info:      info,
+			Chart:     &chart.Chart{},
+			Hooks:     hooks,
+		}, {
+			Name:      "aramis",
+			Namespace: "default",
+			Info:      info,
+			Chart:     &chart.Chart{},
+			Hooks:     hooks,
+		}, {
+			Name:      "dartagnan",
+			Namespace: "gascony",
+			Info:      info,
+			Chart:     &chart.Chart{},
+			Hooks:     hooks,
+		}}
 	}
+
+	tests := []cmdTestCase{{
+		name:   "completion for status",
+		cmd:    "__complete status a",
+		golden: "output/status-comp.txt",
+		rels: releasesMockWithStatus(&release.Info{
+			Status: release.StatusDeployed,
+		}),
+	}, {
+		name:   "completion for status with too many arguments",
+		cmd:    "__complete status dartagnan ''",
+		golden: "output/status-wrong-args-comp.txt",
+		rels: releasesMockWithStatus(&release.Info{
+			Status: release.StatusDeployed,
+		}),
+	}, {
+		name:   "completion for status with too many arguments",
+		cmd:    "__complete status --debug a",
+		golden: "output/status-comp.txt",
+		rels: releasesMockWithStatus(&release.Info{
+			Status: release.StatusDeployed,
+		}),
+	}}
+	runTestCmd(t, tests)
+}
+
+func TestStatusRevisionCompletion(t *testing.T) {
+	revisionFlagCompletionTest(t, "status")
+}
+
+func TestStatusOutputCompletion(t *testing.T) {
+	outputFlagCompletionTest(t, "status")
 }

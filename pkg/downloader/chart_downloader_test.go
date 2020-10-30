@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,20 +16,21 @@ limitations under the License.
 package downloader
 
 import (
-	"fmt"
-	"io/ioutil"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"k8s.io/helm/pkg/getter"
-	"k8s.io/helm/pkg/helm/environment"
-	"k8s.io/helm/pkg/helm/helmpath"
-	"k8s.io/helm/pkg/repo"
-	"k8s.io/helm/pkg/repo/repotest"
+	"helm.sh/helm/v3/internal/test/ensure"
+	"helm.sh/helm/v3/pkg/cli"
+	"helm.sh/helm/v3/pkg/getter"
+	"helm.sh/helm/v3/pkg/repo"
+	"helm.sh/helm/v3/pkg/repo/repotest"
+)
+
+const (
+	repoConfig = "testdata/repositories.yaml"
+	repoCache  = "testdata/repository"
 )
 
 func TestResolveChartRef(t *testing.T) {
@@ -55,22 +56,87 @@ func TestResolveChartRef(t *testing.T) {
 	}
 
 	c := ChartDownloader{
-		HelmHome: helmpath.Home("testdata/helmhome"),
-		Out:      os.Stderr,
-		Getters:  getter.All(environment.EnvSettings{}),
+		Out:              os.Stderr,
+		RepositoryConfig: repoConfig,
+		RepositoryCache:  repoCache,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryConfig: repoConfig,
+			RepositoryCache:  repoCache,
+		}),
 	}
 
 	for _, tt := range tests {
-		u, _, err := c.ResolveChartVersion(tt.ref, tt.version)
+		u, err := c.ResolveChartVersion(tt.ref, tt.version)
 		if err != nil {
 			if tt.fail {
 				continue
 			}
-			t.Errorf("%s: failed with error %s", tt.name, err)
+			t.Errorf("%s: failed with error %q", tt.name, err)
 			continue
 		}
 		if got := u.String(); got != tt.expect {
 			t.Errorf("%s: expected %s, got %s", tt.name, tt.expect, got)
+		}
+	}
+}
+
+func TestResolveChartOpts(t *testing.T) {
+	tests := []struct {
+		name, ref, version string
+		expect             []getter.Option
+	}{
+		{
+			name: "repo with CA-file",
+			ref:  "testing-ca-file/foo",
+			expect: []getter.Option{
+				getter.WithURL("https://example.com/foo-1.2.3.tgz"),
+				getter.WithTLSClientConfig("cert", "key", "ca"),
+			},
+		},
+	}
+
+	c := ChartDownloader{
+		Out:              os.Stderr,
+		RepositoryConfig: repoConfig,
+		RepositoryCache:  repoCache,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryConfig: repoConfig,
+			RepositoryCache:  repoCache,
+		}),
+	}
+
+	// snapshot options
+	snapshotOpts := c.Options
+
+	for _, tt := range tests {
+		// reset chart downloader options for each test case
+		c.Options = snapshotOpts
+
+		expect, err := getter.NewHTTPGetter(tt.expect...)
+		if err != nil {
+			t.Errorf("%s: failed to setup http client: %s", tt.name, err)
+			continue
+		}
+
+		u, err := c.ResolveChartVersion(tt.ref, tt.version)
+		if err != nil {
+			t.Errorf("%s: failed with error %s", tt.name, err)
+			continue
+		}
+
+		got, err := getter.NewHTTPGetter(
+			append(
+				c.Options,
+				getter.WithURL(u.String()),
+			)...,
+		)
+		if err != nil {
+			t.Errorf("%s: failed to create http client: %s", tt.name, err)
+			continue
+		}
+
+		if *(got.(*getter.HTTPGetter)) != *(expect.(*getter.HTTPGetter)) {
+			t.Errorf("%s: expected %s, got %s", tt.name, expect, got)
 		}
 	}
 }
@@ -84,53 +150,6 @@ func TestVerifyChart(t *testing.T) {
 	// we just want a quick sanity check that the v is not empty.
 	if len(v.FileHash) == 0 {
 		t.Error("Digest missing")
-	}
-}
-
-func TestDownload(t *testing.T) {
-	expect := "Call me Ishmael"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, expect)
-	}))
-	defer srv.Close()
-
-	provider, err := getter.ByScheme("http", environment.EnvSettings{})
-	if err != nil {
-		t.Fatal("No http provider found")
-	}
-
-	getter, err := provider.New(srv.URL, "", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := getter.Get(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got.String() != expect {
-		t.Errorf("Expected %q, got %q", expect, got.String())
-	}
-
-	// test with server backed by basic auth
-	basicAuthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok || username != "username" && password != "password" {
-			t.Errorf("Expected request to use basic auth and for username == 'username' and password == 'password', got '%v', '%s', '%s'", ok, username, password)
-		}
-		fmt.Fprint(w, expect)
-	}))
-	defer basicAuthSrv.Close()
-
-	u, _ := url.ParseRequestURI(basicAuthSrv.URL)
-	u.User = url.UserPassword("username", "password")
-	got, err = getter.Get(u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if got.String() != expect {
-		t.Errorf("Expected %q, got %q", expect, got.String())
 	}
 }
 
@@ -152,53 +171,47 @@ func TestIsTar(t *testing.T) {
 }
 
 func TestDownloadTo(t *testing.T) {
-	tmp, err := ioutil.TempDir("", "helm-downloadto-")
+	// Set up a fake repo with basic auth enabled
+	srv, err := repotest.NewTempServer("testdata/*.tgz*")
+	srv.Stop()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmp)
-
-	hh := helmpath.Home(tmp)
-	dest := filepath.Join(hh.String(), "dest")
-	configDirectories := []string{
-		hh.String(),
-		hh.Repository(),
-		hh.Cache(),
-		dest,
-	}
-	for _, p := range configDirectories {
-		if fi, err := os.Stat(p); err != nil {
-			if err := os.MkdirAll(p, 0755); err != nil {
-				t.Fatalf("Could not create %s: %s", p, err)
-			}
-		} else if !fi.IsDir() {
-			t.Fatalf("%s must be a directory", p)
+	srv.WithMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "username" || password != "password" {
+			t.Errorf("Expected request to use basic auth and for username == 'username' and password == 'password', got '%v', '%s', '%s'", ok, username, password)
 		}
+	}))
+	srv.Start()
+	defer srv.Stop()
+	if err := srv.CreateIndex(); err != nil {
+		t.Fatal(err)
 	}
 
-	// Set up a fake repo
-	srv := repotest.NewServer(tmp)
-	defer srv.Stop()
-	if _, err := srv.CopyCharts("testdata/*.tgz*"); err != nil {
-		t.Error(err)
-		return
-	}
 	if err := srv.LinkIndices(); err != nil {
 		t.Fatal(err)
 	}
 
 	c := ChartDownloader{
-		HelmHome: hh,
-		Out:      os.Stderr,
-		Verify:   VerifyAlways,
-		Keyring:  "testdata/helm-test-key.pub",
-		Getters:  getter.All(environment.EnvSettings{}),
+		Out:              os.Stderr,
+		Verify:           VerifyAlways,
+		Keyring:          "testdata/helm-test-key.pub",
+		RepositoryConfig: repoConfig,
+		RepositoryCache:  repoCache,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryConfig: repoConfig,
+			RepositoryCache:  repoCache,
+		}),
+		Options: []getter.Option{
+			getter.WithBasicAuth("username", "password"),
+		},
 	}
 	cname := "/signtest-0.1.0.tgz"
+	dest := srv.Root()
 	where, v, err := c.DownloadTo(srv.URL()+cname, "", dest)
 	if err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
 
 	if expect := filepath.Join(dest, cname); where != expect {
@@ -211,57 +224,90 @@ func TestDownloadTo(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dest, cname)); err != nil {
 		t.Error(err)
-		return
 	}
 }
 
-func TestDownloadTo_VerifyLater(t *testing.T) {
-	tmp, err := ioutil.TempDir("", "helm-downloadto-")
+func TestDownloadTo_TLS(t *testing.T) {
+	// Set up mock server w/ tls enabled
+	srv, err := repotest.NewTempServer("testdata/*.tgz*")
+	srv.Stop()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmp)
-
-	hh := helmpath.Home(tmp)
-	dest := filepath.Join(hh.String(), "dest")
-	configDirectories := []string{
-		hh.String(),
-		hh.Repository(),
-		hh.Cache(),
-		dest,
-	}
-	for _, p := range configDirectories {
-		if fi, err := os.Stat(p); err != nil {
-			if err := os.MkdirAll(p, 0755); err != nil {
-				t.Fatalf("Could not create %s: %s", p, err)
-			}
-		} else if !fi.IsDir() {
-			t.Fatalf("%s must be a directory", p)
-		}
-	}
-
-	// Set up a fake repo
-	srv := repotest.NewServer(tmp)
+	srv.StartTLS()
 	defer srv.Stop()
-	if _, err := srv.CopyCharts("testdata/*.tgz*"); err != nil {
-		t.Error(err)
-		return
+	if err := srv.CreateIndex(); err != nil {
+		t.Fatal(err)
 	}
 	if err := srv.LinkIndices(); err != nil {
 		t.Fatal(err)
 	}
 
+	repoConfig := filepath.Join(srv.Root(), "repositories.yaml")
+	repoCache := srv.Root()
+
 	c := ChartDownloader{
-		HelmHome: hh,
-		Out:      os.Stderr,
-		Verify:   VerifyLater,
-		Getters:  getter.All(environment.EnvSettings{}),
+		Out:              os.Stderr,
+		Verify:           VerifyAlways,
+		Keyring:          "testdata/helm-test-key.pub",
+		RepositoryConfig: repoConfig,
+		RepositoryCache:  repoCache,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryConfig: repoConfig,
+			RepositoryCache:  repoCache,
+		}),
+		Options: []getter.Option{},
+	}
+	cname := "test/signtest"
+	dest := srv.Root()
+	where, v, err := c.DownloadTo(cname, "", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(dest, "signtest-0.1.0.tgz")
+	if expect := target; where != expect {
+		t.Errorf("Expected download to %s, got %s", expect, where)
+	}
+
+	if v.FileHash == "" {
+		t.Error("File hash was empty, but verification is required.")
+	}
+
+	if _, err := os.Stat(target); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestDownloadTo_VerifyLater(t *testing.T) {
+	defer ensure.HelmHome(t)()
+
+	dest := ensure.TempDir(t)
+
+	// Set up a fake repo
+	srv, err := repotest.NewTempServer("testdata/*.tgz*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	if err := srv.LinkIndices(); err != nil {
+		t.Fatal(err)
+	}
+
+	c := ChartDownloader{
+		Out:              os.Stderr,
+		Verify:           VerifyLater,
+		RepositoryConfig: repoConfig,
+		RepositoryCache:  repoCache,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryConfig: repoConfig,
+			RepositoryCache:  repoCache,
+		}),
 	}
 	cname := "/signtest-0.1.0.tgz"
 	where, _, err := c.DownloadTo(srv.URL()+cname, "", dest)
 	if err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
 
 	if expect := filepath.Join(dest, cname); where != expect {
@@ -269,26 +315,27 @@ func TestDownloadTo_VerifyLater(t *testing.T) {
 	}
 
 	if _, err := os.Stat(filepath.Join(dest, cname)); err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, cname+".prov")); err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
 }
 
 func TestScanReposForURL(t *testing.T) {
-	hh := helmpath.Home("testdata/helmhome")
 	c := ChartDownloader{
-		HelmHome: hh,
-		Out:      os.Stderr,
-		Verify:   VerifyLater,
-		Getters:  getter.All(environment.EnvSettings{}),
+		Out:              os.Stderr,
+		Verify:           VerifyLater,
+		RepositoryConfig: repoConfig,
+		RepositoryCache:  repoCache,
+		Getters: getter.All(&cli.EnvSettings{
+			RepositoryConfig: repoConfig,
+			RepositoryCache:  repoCache,
+		}),
 	}
 
 	u := "http://example.com/alpine-0.2.0.tgz"
-	rf, err := repo.LoadRepositoriesFile(c.HelmHome.RepositoryFile())
+	rf, err := repo.LoadFile(repoConfig)
 	if err != nil {
 		t.Fatal(err)
 	}

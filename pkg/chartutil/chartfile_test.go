@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package chartutil
 import (
 	"testing"
 
-	"k8s.io/helm/pkg/proto/hapi/chart"
+	"helm.sh/helm/v3/pkg/chart"
 )
 
 const testfile = "testdata/chartfiletest.yaml"
@@ -39,9 +39,8 @@ func verifyChartfile(t *testing.T, f *chart.Metadata, name string) {
 		t.Fatal("Failed verifyChartfile because f is nil")
 	}
 
-	// Api instead of API because it was generated via protobuf.
-	if f.ApiVersion != ApiVersionV1 {
-		t.Errorf("Expected API Version %q, got %q", ApiVersionV1, f.ApiVersion)
+	if f.APIVersion != chart.APIVersionV1 {
+		t.Errorf("Expected API Version %q, got %q", chart.APIVersionV1, f.APIVersion)
 	}
 
 	if f.Name != name {

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,12 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/helm/pkg/helm"
+	"helm.sh/helm/v3/cmd/helm/require"
+	"helm.sh/helm/v3/pkg/action"
 )
 
 var getManifestHelp = `
@@ -33,45 +35,41 @@ were generated from this release's chart(s). If a chart is dependent on other
 charts, those resources will also be included in the manifest.
 `
 
-type getManifestCmd struct {
-	release string
-	out     io.Writer
-	client  helm.Interface
-	version int32
-}
+func newGetManifestCmd(cfg *action.Configuration, out io.Writer) *cobra.Command {
+	client := action.NewGet(cfg)
 
-func newGetManifestCmd(client helm.Interface, out io.Writer) *cobra.Command {
-	get := &getManifestCmd{
-		out:    out,
-		client: client,
-	}
 	cmd := &cobra.Command{
-		Use:     "manifest [flags] RELEASE_NAME",
-		Short:   "download the manifest for a named release",
-		Long:    getManifestHelp,
-		PreRunE: func(_ *cobra.Command, _ []string) error { return setupConnection() },
+		Use:   "manifest RELEASE_NAME",
+		Short: "download the manifest for a named release",
+		Long:  getManifestHelp,
+		Args:  require.ExactArgs(1),
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			if len(args) != 0 {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+			return compListReleases(toComplete, cfg)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return errReleaseRequired
+			res, err := client.Run(args[0])
+			if err != nil {
+				return err
 			}
-			get.release = args[0]
-			if get.client == nil {
-				get.client = helm.NewClient(helm.Host(settings.TillerHost))
-			}
-			return get.run()
+			fmt.Fprintln(out, res.Manifest)
+			return nil
 		},
 	}
 
-	cmd.Flags().Int32Var(&get.version, "revision", 0, "get the named release with revision")
-	return cmd
-}
+	cmd.Flags().IntVar(&client.Version, "revision", 0, "get the named release with revision")
+	err := cmd.RegisterFlagCompletionFunc("revision", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 1 {
+			return compListRevisions(toComplete, cfg, args[0])
+		}
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	})
 
-// getManifest implements 'helm get manifest'
-func (g *getManifestCmd) run() error {
-	res, err := g.client.ReleaseContent(g.release, helm.ContentReleaseVersion(g.version))
 	if err != nil {
-		return prettyError(err)
+		log.Fatal(err)
 	}
-	fmt.Fprintln(g.out, res.Release.Manifest)
-	return nil
+
+	return cmd
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,20 +18,87 @@ package getter
 
 import (
 	"bytes"
-	"fmt"
+	"time"
 
-	"k8s.io/helm/pkg/helm/environment"
+	"github.com/pkg/errors"
+
+	"helm.sh/helm/v3/pkg/cli"
 )
+
+// options are generic parameters to be provided to the getter during instantiation.
+//
+// Getters may or may not ignore these parameters as they are passed in.
+type options struct {
+	url                   string
+	certFile              string
+	keyFile               string
+	caFile                string
+	insecureSkipVerifyTLS bool
+	username              string
+	password              string
+	userAgent             string
+	timeout               time.Duration
+}
+
+// Option allows specifying various settings configurable by the user for overriding the defaults
+// used when performing Get operations with the Getter.
+type Option func(*options)
+
+// WithURL informs the getter the server name that will be used when fetching objects. Used in conjunction with
+// WithTLSClientConfig to set the TLSClientConfig's server name.
+func WithURL(url string) Option {
+	return func(opts *options) {
+		opts.url = url
+	}
+}
+
+// WithBasicAuth sets the request's Authorization header to use the provided credentials
+func WithBasicAuth(username, password string) Option {
+	return func(opts *options) {
+		opts.username = username
+		opts.password = password
+	}
+}
+
+// WithUserAgent sets the request's User-Agent header to use the provided agent name.
+func WithUserAgent(userAgent string) Option {
+	return func(opts *options) {
+		opts.userAgent = userAgent
+	}
+}
+
+// WithInsecureSkipVerifyTLS determines if a TLS Certificate will be checked
+func WithInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) Option {
+	return func(opts *options) {
+		opts.insecureSkipVerifyTLS = insecureSkipVerifyTLS
+	}
+}
+
+// WithTLSClientConfig sets the client auth with the provided credentials.
+func WithTLSClientConfig(certFile, keyFile, caFile string) Option {
+	return func(opts *options) {
+		opts.certFile = certFile
+		opts.keyFile = keyFile
+		opts.caFile = caFile
+	}
+}
+
+// WithTimeout sets the timeout for requests
+func WithTimeout(timeout time.Duration) Option {
+	return func(opts *options) {
+		opts.timeout = timeout
+	}
+}
 
 // Getter is an interface to support GET to the specified URL.
 type Getter interface {
-	//Get file content by url string
-	Get(url string) (*bytes.Buffer, error)
+	// Get file content by url string
+	Get(url string, options ...Option) (*bytes.Buffer, error)
 }
 
 // Constructor is the function for every getter which creates a specific instance
 // according to the configuration
-type Constructor func(URL, CertFile, KeyFile, CAFile string) (Getter, error)
+type Constructor func(options ...Option) (Getter, error)
 
 // Provider represents any getter and the schemes that it supports.
 //
@@ -58,41 +125,26 @@ type Providers []Provider
 // ByScheme returns a Provider that handles the given scheme.
 //
 // If no provider handles this scheme, this will return an error.
-func (p Providers) ByScheme(scheme string) (Constructor, error) {
+func (p Providers) ByScheme(scheme string) (Getter, error) {
 	for _, pp := range p {
 		if pp.Provides(scheme) {
-			return pp.New, nil
+			return pp.New()
 		}
 	}
-	return nil, fmt.Errorf("scheme %q not supported", scheme)
+	return nil, errors.Errorf("scheme %q not supported", scheme)
+}
+
+var httpProvider = Provider{
+	Schemes: []string{"http", "https"},
+	New:     NewHTTPGetter,
 }
 
 // All finds all of the registered getters as a list of Provider instances.
-// Currently the build-in http/https getter and the discovered
-// plugins with downloader notations are collected.
-func All(settings environment.EnvSettings) Providers {
-	result := Providers{
-		{
-			Schemes: []string{"http", "https"},
-			New:     newHTTPGetter,
-		},
-	}
+// Currently, the built-in getters and the discovered plugins with downloader
+// notations are collected.
+func All(settings *cli.EnvSettings) Providers {
+	result := Providers{httpProvider}
 	pluginDownloaders, _ := collectPlugins(settings)
 	result = append(result, pluginDownloaders...)
 	return result
-}
-
-// ByScheme returns a getter for the given scheme.
-//
-// If the scheme is not supported, this will return an error.
-func ByScheme(scheme string, settings environment.EnvSettings) (Provider, error) {
-	// Q: What do you call a scheme string who's the boss?
-	// A: Bruce Schemestring, of course.
-	a := All(settings)
-	for _, p := range a {
-		if p.Provides(scheme) {
-			return p, nil
-		}
-	}
-	return Provider{}, fmt.Errorf("scheme %q not supported", scheme)
 }

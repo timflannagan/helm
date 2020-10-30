@@ -1,5 +1,5 @@
 // Package registry contains client primitives to interact with a remote Docker registry.
-package registry
+package registry // import "github.com/docker/docker/registry"
 
 import (
 	"crypto/tls"
@@ -14,7 +14,8 @@ import (
 	"time"
 
 	"github.com/docker/distribution/registry/client/transport"
-	"github.com/docker/go-connections/sockets"
+	"github.com/docker/docker/pkg/homedir"
+	"github.com/docker/docker/rootless"
 	"github.com/docker/go-connections/tlsconfig"
 	"github.com/sirupsen/logrus"
 )
@@ -32,7 +33,19 @@ func newTLSConfig(hostname string, isSecure bool) (*tls.Config, error) {
 	tlsConfig.InsecureSkipVerify = !isSecure
 
 	if isSecure && CertsDir != "" {
-		hostDir := filepath.Join(CertsDir, cleanPath(hostname))
+		certsDir := CertsDir
+
+		if rootless.RunningWithRootlessKit() {
+			configHome, err := homedir.GetConfigHome()
+			if err != nil {
+				return nil, err
+			}
+
+			certsDir = filepath.Join(configHome, "docker/certs.d")
+		}
+
+		hostDir := filepath.Join(certsDir, cleanPath(hostname))
+
 		logrus.Debugf("hostDir: %s", hostDir)
 		if err := ReadCertsDirectory(tlsConfig, hostDir); err != nil {
 			return nil, err
@@ -56,7 +69,7 @@ func hasFile(files []os.FileInfo, name string) bool {
 // provided TLS configuration.
 func ReadCertsDirectory(tlsConfig *tls.Config, directory string) error {
 	fs, err := ioutil.ReadDir(directory)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) && !os.IsPermission(err) {
 		return err
 	}
 
@@ -81,7 +94,7 @@ func ReadCertsDirectory(tlsConfig *tls.Config, directory string) error {
 			keyName := certName[:len(certName)-5] + ".key"
 			logrus.Debugf("cert: %s", filepath.Join(directory, f.Name()))
 			if !hasFile(fs, keyName) {
-				return fmt.Errorf("Missing key %s for client certificate %s. Note that CA certificates should use the extension .crt.", keyName, certName)
+				return fmt.Errorf("missing key %s for client certificate %s. Note that CA certificates should use the extension .crt", keyName, certName)
 			}
 			cert, err := tls.LoadX509KeyPair(filepath.Join(directory, certName), filepath.Join(directory, keyName))
 			if err != nil {
@@ -102,8 +115,8 @@ func ReadCertsDirectory(tlsConfig *tls.Config, directory string) error {
 	return nil
 }
 
-// DockerHeaders returns request modifiers with a User-Agent and metaHeaders
-func DockerHeaders(userAgent string, metaHeaders http.Header) []transport.RequestModifier {
+// Headers returns request modifiers with a User-Agent and metaHeaders
+func Headers(userAgent string, metaHeaders http.Header) []transport.RequestModifier {
 	modifiers := []transport.RequestModifier{}
 	if userAgent != "" {
 		modifiers = append(modifiers, transport.NewHeaderRequestModifier(http.Header{
@@ -145,7 +158,7 @@ func trustedLocation(req *http.Request) bool {
 // addRequiredHeadersToRedirectedRequests adds the necessary redirection headers
 // for redirected requests
 func addRequiredHeadersToRedirectedRequests(req *http.Request, via []*http.Request) error {
-	if via != nil && via[0] != nil {
+	if len(via) != 0 && via[0] != nil {
 		if trustedLocation(req) && trustedLocation(via[0]) {
 			req.Header = via[0].Header
 			return nil
@@ -176,16 +189,12 @@ func NewTransport(tlsConfig *tls.Config) *http.Transport {
 
 	base := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
-		Dial:                direct.Dial,
+		DialContext:         direct.DialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     tlsConfig,
 		// TODO(dmcgowan): Call close idle connections when complete and use keep alive
 		DisableKeepAlives: true,
 	}
 
-	proxyDialer, err := sockets.DialerFromEnvironment(direct)
-	if err == nil {
-		base.Dial = proxyDialer.Dial
-	}
 	return base
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors All rights reserved.
+Copyright The Helm Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,8 +16,8 @@ limitations under the License.
 /*Package downloader provides a library for downloading charts.
 
 This package contains various tools for downloading charts from repository
-servers, and then storing them in Helm-specific directory structures (like
-HELM_HOME). This library contains many functions that depend on a specific
+servers, and then storing them in Helm-specific directory structures. This
+library contains many functions that depend on a specific
 filesystem layout.
 */
 package downloader

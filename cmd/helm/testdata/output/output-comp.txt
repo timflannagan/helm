@@ -1,0 +1,5 @@
+table
+json
+yaml
+:0
+Completion ended with directive: ShellCompDirectiveDefault

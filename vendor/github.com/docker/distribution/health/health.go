@@ -215,7 +215,7 @@ func RegisterFunc(name string, check func() error) {
 // RegisterPeriodicFunc allows the convenience of registering a PeriodicChecker
 // from an arbitrary func() error.
 func (registry *Registry) RegisterPeriodicFunc(name string, period time.Duration, check CheckFunc) {
-	registry.Register(name, PeriodicChecker(CheckFunc(check), period))
+	registry.Register(name, PeriodicChecker(check, period))
 }
 
 // RegisterPeriodicFunc allows the convenience of registering a PeriodicChecker
@@ -227,7 +227,7 @@ func RegisterPeriodicFunc(name string, period time.Duration, check CheckFunc) {
 // RegisterPeriodicThresholdFunc allows the convenience of registering a
 // PeriodicChecker from an arbitrary func() error.
 func (registry *Registry) RegisterPeriodicThresholdFunc(name string, period time.Duration, threshold int, check CheckFunc) {
-	registry.Register(name, PeriodicThresholdChecker(CheckFunc(check), period, threshold))
+	registry.Register(name, PeriodicThresholdChecker(check, period, threshold))
 }
 
 // RegisterPeriodicThresholdFunc allows the convenience of registering a
@@ -291,7 +291,7 @@ func statusResponse(w http.ResponseWriter, r *http.Request, status int, checks m
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprint(len(p)))
 	w.WriteHeader(status)
 	if _, err := w.Write(p); err != nil {
