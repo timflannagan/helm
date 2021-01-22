@@ -1,4 +1,4 @@
-FROM registry.svc.ci.openshift.org/ocp/builder:rhel-8-golang-1.15-openshift-4.7 AS build
+FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.15-openshift-4.7 AS build
 
 RUN yum install --setopt=skip_missing_names_on_install=False -y \
         hg git make \
@@ -15,7 +15,7 @@ COPY . .
 ENV VERSION ""
 RUN make build
 
-FROM registry.svc.ci.openshift.org/ocp/builder:rhel-8-base-openshift-4.7
+FROM registry.ci.openshift.org/ocp/builder:rhel-8-base-openshift-4.7
 
 COPY --from=build /go/src/k8s.io/helm/bin/helm /usr/local/bin
 
