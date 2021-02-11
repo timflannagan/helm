@@ -19,6 +19,7 @@ require (
 	github.com/evanphx/json-patch v0.0.0-20200808040245-162e5629780b
 	github.com/gobwas/glob v0.2.3
 	github.com/gofrs/flock v0.7.1
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/gosuri/uitable v0.0.4
 	github.com/jmoiron/sqlx v1.2.0
 	github.com/lib/pq v1.7.0
@@ -47,6 +48,7 @@ require (
 replace (
 	github.com/Azure/go-autorest => github.com/Azure/go-autorest v13.3.2+incompatible
 	github.com/docker/distribution => github.com/docker/distribution v0.0.0-20191216044856-a8371794149d
+	github.com/gogo/protobuf => github.com/gogo/protobuf v1.3.2
 
 	golang.org/x/text => golang.org/x/text v0.3.3
 )
